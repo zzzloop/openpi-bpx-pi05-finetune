@@ -1,0 +1,544 @@
+# BPX π0.5 真机数据微调工程
+
+本目录把已经对齐的 BPX 遥操 HDF5 数据转换为 OpenPI 使用的 LeRobot v2.1 数据集，并提供 π0.5 全参数微调与 JAX LoRA 微调配置。范围只包括数据检查、转换、训练和模型输出适配；不包含实机控制接口，也不包含仿真。
+
+实现基于 OpenPI 提交 `15a9616a00943ada6c20a0f158e3adb39df2ccac`，遵循官方的“转换为 LeRobot → 定义机器人输入/输出变换 → 计算 norm stats → 微调 → policy server”流程：
+
+- [OpenPI README：自定义数据微调](../../README.md)
+- [OpenPI UR5 自定义机器人示例](../ur5/README.md)
+- [OpenPI 归一化说明](../../docs/norm_stats.md)
+- [OpenPI 远程推理说明](../../docs/remote_inference.md)
+- [OpenPI 固定的 LeRobot v2.1 实现](https://github.com/huggingface/lerobot/blob/0cf864870cf29f4738d3ade893e6fd13fbd7cdb5/lerobot/common/datasets/lerobot_dataset.py)
+
+## 1. 已确认的训练定义
+
+### 1.1 原始 23 维关节顺序
+
+HDF5 中 `observations/qpos` 和 `action` 必须严格使用下列顺序：
+
+| 原始索引 | 关节 |
+|---:|---|
+| 0 | `FoldingModularJoint02_Joint` |
+| 1 | `FoldingModularJoint03_Joint` |
+| 2 | `Trunk_Joint` |
+| 3–9 | `ArmL02_Joint` … `ArmL08_Joint` |
+| 10–11 | `JawBlock01_Joint`, `JawBlock02_Joint` |
+| 12–18 | `ArmR02_Joint` … `ArmR08_Joint` |
+| 19–20 | `JawBlock03_Joint`, `JawBlock04_Joint` |
+| 21–22 | `Head02_Joint`, `Head03_Joint` |
+
+语义：
+
+- `observations/qpos[t]`：机器人在时刻 `t` 的实际反馈位置。
+- `action[t]`：遥操系统在时刻 `t` 下发的绝对目标位置。
+- 四路图像、qpos、action 已在采集端按固定 30 Hz 对齐。
+- 两个腰部关节和躯干在本阶段冻结。
+- 头部由策略主动控制；左眼图像会随头部动作变化。
+- 每个实机夹爪只有一个物理自由度。HDF5 将该物理值平均分在两个 JawBlock 槽位中：例如左夹爪真机值为 `0.84` 时，`raw[10]=0.42`、`raw[11]=0.42`，两者之和才是真机的一维值。
+
+### 1.2 模型使用的 18 维有效向量
+
+转换器删除冻结的原始索引 `0:3`，并把每个重复夹爪对求和为一个物理自由度：
+
+```text
+effective[0:7]    = raw[3:10]          # 左臂 7
+effective[7]      = raw[10] + raw[11]  # 左夹爪物理 1-DoF
+effective[8:15]   = raw[12:19]         # 右臂 7
+effective[15]     = raw[19] + raw[20]  # 右夹爪物理 1-DoF
+effective[16:18]  = raw[21:23]         # 主动头部 2
+```
+
+π0.5 内部动作维度仍是 32，OpenPI 的 `PadStatesAndActions` 会把 18 维补到 32；不修改基础模型结构。
+
+推理输出经过 `BpxOutputs` 后：
+
+1. 截取模型前 18 维；
+2. 将每个物理夹爪输出除以 2 后分别写入对应两个 JawBlock 槽，保证两槽之和等于模型输出；
+3. 在最前面插入固定腰部值 `[0, 0, 0]`；
+4. 返回原始顺序的 `(action_horizon, 23)`。
+
+如果后续部署使用的腰部保持姿态不是零位，只需给 `BpxOutputs.waist_position` 传入对应的三个固定值；不需要重新训练。
+
+### 1.3 动作表示
+
+原始 HDF5 保存绝对目标位置。训练数据管线对以下维度转换为相对当前 qpos 的 delta action：
+
+- 左臂 7 维；
+- 右臂 7 维；
+- 头部 2 维。
+
+两个物理夹爪维度保持绝对值。policy server 输出时按相反顺序恢复成绝对目标，再拆分并恢复为 23 维。
+
+30 Hz 下使用 `action_horizon=30`，即每个训练目标覆盖约 1 秒。部署端可以只执行 chunk 的前若干步后重新规划，不要求开环执行完 30 步。
+
+## 2. 图像定义
+
+原始 HDF5 含四路 `(T, 360, 640, 3) uint8` 图像：
+
+```text
+observations/images/left_eye
+observations/images/right_eye
+observations/images/left_wrist
+observations/images/right_wrist
+```
+
+训练使用：
+
+| HDF5 | π0.5 图像槽 |
+|---|---|
+| `left_eye` | `base_0_rgb` |
+| `left_wrist` | `left_wrist_0_rgb` |
+| `right_wrist` | `right_wrist_0_rgb` |
+| `right_eye` | 丢弃 |
+
+LeRobot 保留完整 `360×640` RGB 图像，不在数据转换阶段裁剪。OpenPI 使用官方 `resize_with_pad` 等比例缩放到 `224×224`：`360×640` 的有效图像约缩放为 `126×224`，再在上下补边，不会裁掉左右视野。训练与推理必须采用同一处理。
+
+当前默认按 RGB 解释。转换前应导出预览：
+
+```bash
+uv run examples/bpx/preview_bpx_images.py \
+  --episode-path datasets/cleaned_bpx/episode_0.hdf5 \
+  --output artifacts/bpx_camera_preview_rgb.png \
+  --image-color-order rgb
+```
+
+如果红蓝明显颠倒，再生成 BGR 版本比较：
+
+```bash
+uv run examples/bpx/preview_bpx_images.py \
+  --episode-path datasets/cleaned_bpx/episode_0.hdf5 \
+  --output artifacts/bpx_camera_preview_bgr.png \
+  --image-color-order bgr
+```
+
+最终转换时必须使用确认后的同一颜色选项。
+
+## 3. 数据采集与筛选要求
+
+### 3.1 HDF5 schema
+
+每条成功示范一个 `episode_*.hdf5`：
+
+```text
+action                                      (T, 23) float32
+observations/qpos                           (T, 23) float32
+observations/images/left_eye                (T, 360, 640, 3) uint8
+observations/images/right_eye               (T, 360, 640, 3) uint8
+observations/images/left_wrist              (T, 360, 640, 3) uint8
+observations/images/right_wrist             (T, 360, 640, 3) uint8
+```
+
+可选字段：
+
+```text
+task       UTF-8 string
+success    bool
+```
+
+如果 `task` 不存在，转换器注入：
+
+```text
+Place all the colored blocks on the table into the bucket.
+```
+
+### 3.2 成功与失败数据
+
+首版训练只使用成功 episode。OpenPI 当前微调目标是动作模仿损失，没有“这是失败动作”的监督信号；未标注失败轨迹会被当成正确行为学习。
+
+处理规则：
+
+- 完整失败且未恢复：不要放进训练目录，单独归档用于评测和故障分析。
+- 中途出现偏差、随后通过合理动作恢复并最终完成任务：可以作为成功示范保留。
+- 人工急停、通信异常、相机掉帧、动作越界：直接剔除。
+- 不要为了增加数量重复完全相同的轨迹。
+
+### 3.3 建议覆盖范围
+
+几百条成功示范应覆盖变化，而不只是重复同一摆放：
+
+- 方块颜色、数量、位置、朝向和相互遮挡；
+- 桶在允许工作区内的位置和朝向；
+- 左右夹爪选择、跨手操作和双臂避让；
+- 初始双臂与头部姿态；
+- 正常照明变化、桌面背景和相机轻微扰动；
+- 抓空后重新定位、物体滑落后再次抓取等最终成功的恢复动作。
+
+当前已确认的 59 条成功 episode 全部用于首轮训练闭环，不自行删除或划出其中任何 episode。独立评测应使用另行采集且不参加训练的真实场景；如果以后确需从示教中留出 episode，必须先确认，且绝不能随机拆分同一轨迹的帧。
+
+## 4. 服务器环境
+
+OpenPI 官方主要测试 Ubuntu 22.04。本项目按 Ubuntu 22.04、256 GB 内存和约 196 GB 总显存设计。
+
+在服务器克隆修改后的仓库并进入仓库根目录：
+
+```bash
+GIT_LFS_SKIP_SMUDGE=1 uv sync
+GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+uv pip install h5py
+```
+
+训练使用 JAX。全参数微调是主方案；LoRA 用作低成本对照和快速排错。OpenPI 的 PyTorch 路径需要先转换 checkpoint，且当前不支持 JAX 路径已有的 LoRA、FSDP 和 EMA 组合，因此本 BPX 首版不把 PyTorch 作为主训练路径。
+
+## 5. 放置 π0.5 base
+
+复制完整的官方 `pi05_base` checkpoint 到：
+
+```text
+checkpoints/pretrained/pi05_base/
+├── params/
+└── assets/          # 如果所复制 checkpoint 包含此目录，也一并保留
+```
+
+两个 BPX 配置都使用相对路径：
+
+```text
+./checkpoints/pretrained/pi05_base/params
+```
+
+不要只复制目录中的某几个文件，也不要把训练输出写入 `checkpoints/pretrained/`。BPX 训练 checkpoint 会写到独立的：
+
+```text
+checkpoints/pi05_bpx_full/...
+checkpoints/pi05_bpx_lora/...
+```
+
+## 6. 放置并验证已清洗数据
+
+当前 59 条训练轨迹已经完成清洗和逐元素审计，不要在服务器重新清洗。将完整的已清洗目录复制到项目内的相对位置：
+
+```text
+datasets/
+├── cleaned_bpx/         # 已清洗的 59 条训练 episode 及审计文件
+└── lerobot/
+```
+
+复制完成后应同时存在：
+
+```text
+datasets/cleaned_bpx/cleaning_audit.csv
+datasets/cleaned_bpx/cleaning_summary.json
+datasets/cleaned_bpx/.cleaning_records/
+datasets/cleaned_bpx/episode_*.hdf5
+```
+
+`clean_bpx_hdf5.py` 只保留用于追溯现有数据是怎样生成的；当前批次不得再次执行它，除非先确认发现了新的数据错误并重新审计。
+
+先运行仓库门禁和 BPX 配置加载检查：
+
+```bash
+uv run ruff check examples/bpx src/openpi/policies/bpx_constants.py \
+  src/openpi/policies/bpx_policy.py src/openpi/policies/bpx_policy_test.py \
+  src/openpi/training/bpx_config_test.py src/openpi/training/config.py
+uv run ruff format --check examples/bpx src/openpi/policies/bpx_constants.py \
+  src/openpi/policies/bpx_policy.py src/openpi/policies/bpx_policy_test.py \
+  src/openpi/training/bpx_config_test.py src/openpi/training/config.py
+uv run pytest examples/bpx src/openpi/policies/bpx_policy_test.py \
+  src/openpi/training/bpx_config_test.py -q
+```
+
+再运行严格 HDF5 校验：
+
+```bash
+uv run examples/bpx/validate_bpx_hdf5.py \
+  --raw-dir datasets/cleaned_bpx \
+  --action-horizon 30
+```
+
+校验器严格检查：
+
+- 所有模态帧数一致；
+- qpos/action 均为 `(T,23)` 浮点数且无 NaN/Inf；
+- 四路图像均为 `(T,360,640,3) uint8`；
+- 腰部 action 为零；
+- 每侧夹爪的两个 action 严格相等，转换时将两值求和为一个物理夹爪维度；
+- 每条 episode 至少有 30 帧；
+- 报告 action 到 qpos 的最佳反馈延迟和每一有效维度的范围、标准差。
+
+当前 59 条实机数据均为最终成功示教。清洗前共 67,455 帧、约 37.48 分钟。本批次默认参数共修复 439 个 `qpos` 元素、拒绝候选数为 0；对清洗结果再次只读扫描时修复候选数为 0。全量 `action` 与原始数据严格一致，原始/清洗 `qpos` 的差异集合与 `cleaning_audit.csv` 逐点一致。action 到 qpos 的反馈延迟只用于诊断；训练标签仍使用采集端已对齐的同帧 `observation[t]` 与遥操目标 `action[t]`，不额外平移。
+
+## 7. 转换为 LeRobot v2.1
+
+在仓库根目录设置相对数据缓存：
+
+```bash
+export HF_LEROBOT_HOME=./datasets/lerobot
+```
+
+先做单条 episode pilot，确认异步图像写入、LeRobot v2.1 数据落盘和读取均正常：
+
+```bash
+uv run examples/bpx/convert_bpx_data_to_lerobot.py \
+  --raw-dir datasets/cleaned_bpx \
+  --repo-id bpx/bpx_blocks_pilot \
+  --episodes 0 \
+  --image-color-order rgb
+uv run examples/bpx/validate_bpx_lerobot.py \
+  --raw-dir datasets/cleaned_bpx \
+  --repo-id bpx/bpx_blocks_pilot \
+  --episodes 0
+```
+
+pilot 通过后进行首次全量转换：
+
+```bash
+uv run examples/bpx/convert_bpx_data_to_lerobot.py \
+  --raw-dir datasets/cleaned_bpx \
+  --repo-id bpx/bpx_blocks \
+  --image-color-order rgb
+```
+
+输出：
+
+```text
+datasets/lerobot/bpx/bpx_blocks/
+```
+
+只有在明确需要覆盖已有转换结果时才使用：
+
+```bash
+uv run examples/bpx/convert_bpx_data_to_lerobot.py \
+  --raw-dir datasets/cleaned_bpx \
+  --repo-id bpx/bpx_blocks \
+  --image-color-order rgb \
+  --overwrite
+```
+
+转换器会流式读取每帧，不会把数百条 episode 的全部图像一次性载入内存。默认只保存在本地，不上传 Hugging Face Hub。若确需上传，应使用私有数据集并确认数据合规后再加 `--push-to-hub`；默认 `private=true`。
+
+全量转换完成后执行源数据对照验收：
+
+```bash
+uv run examples/bpx/validate_bpx_lerobot.py \
+  --raw-dir datasets/cleaned_bpx \
+  --repo-id bpx/bpx_blocks \
+  --expected-episodes 59 \
+  --expected-frames 67455
+```
+
+该命令逐帧比较 18D state/action 与清洗 HDF5，检查 episode/frame/index/timestamp/task 顺序，并为每条 episode 抽取首、中、末帧的三路 RGB 图像与源图比较。它同时确认右眼不存在、腰部已删除、两侧夹爪等于原始 pair 之和、头部两维仍在。
+
+如果修改 `repo-id`，必须同步修改 `src/openpi/training/config.py` 中两个 BPX 配置的 `repo_id` 和 `asset_id`。
+
+## 8. 训练配置
+
+配置位于 `src/openpi/training/config.py`：
+
+### `pi05_bpx_full`
+
+- π0.5 flow-matching；
+- action horizon 30；
+- 18 维有效状态/动作，模型内部 pad 到 32；
+- 全参数微调；
+- batch size 64；
+- 20,000 steps；
+- EMA 0.999；
+- 主方案，适合当前显存条件。
+
+### `pi05_bpx_lora`
+
+- PaliGemma 与 action expert 均使用 LoRA；
+- action horizon 和数据变换与 full 完全一致；
+- batch size 128；
+- 30,000 steps；
+- 不使用 EMA；
+- 用于快速验证、消融和低成本对照。
+
+两个配置使用同一个 LeRobot 数据集。LoRA 配置复用 full 配置计算出的 norm stats，避免重复解码全部视频。
+
+## 9. 计算归一化统计
+
+每次改变以下任一项后都必须重新计算：
+
+- 训练 episode 集合；
+- 关节顺序或维度；
+- action 定义；
+- delta-action mask；
+- 夹爪转换；
+- 数据采样频率。
+
+命令：
+
+```bash
+export HF_LEROBOT_HOME=./datasets/lerobot
+uv run scripts/compute_norm_stats.py --config-name pi05_bpx_full
+```
+
+输出位于：
+
+```text
+assets/pi05_bpx_full/bpx/bpx_blocks/norm_stats.json
+```
+
+π0.5 使用分位数归一化。生成后打印并检查全部 18 维 state/action 的 `q01`、`q99`、`mean` 和 `std`：
+
+```bash
+uv run examples/bpx/inspect_bpx_norm_stats.py \
+  --norm-stats-path assets/pi05_bpx_full/bpx/bpx_blocks/norm_stats.json
+```
+
+- `q01` 与 `q99` 几乎相同通常表示该维度没有被充分示教；
+- 极小范围可能放大噪声并导致 loss 发散；
+- 不应复用其他机器人（ALOHA、DROID、ARX）的 norm stats；
+- 不应为冻结腰部计算 norm stats，这也是将其删除的原因。
+
+## 10. 全参数微调
+
+建议先进行 1,000–5,000 step 的工程验证，再运行完整训练。
+
+单卡：
+
+```bash
+export HF_LEROBOT_HOME=./datasets/lerobot
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+uv run scripts/train.py pi05_bpx_full \
+  --exp-name=bpx_blocks_full_pilot \
+  --num-train-steps=5000 \
+  --overwrite
+```
+
+pilot 验收必须同时满足：loss 全程有限且总体下降，无 NaN/Inf；日志中的 global batch 为 64；显存和数据吞吐稳定；checkpoint 能保存；使用第 13 节离线 smoke 能重新加载 checkpoint 并得到正确的 23D 输出。任何一项不通过都先排查，不进入长训。
+
+pilot 和离线 smoke 通过后，才根据 `nvidia-smi` 显示的实际 GPU 数量与拓扑决定单卡或多卡 FSDP。多卡命令为：
+
+```bash
+export HF_LEROBOT_HOME=./datasets/lerobot
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+uv run scripts/train.py pi05_bpx_full \
+  --exp-name=bpx_blocks_full \
+  --fsdp-devices=<GPU_COUNT> \
+  --overwrite
+```
+
+要求：
+
+- `<GPU_COUNT>` 不得大于当前进程可见 GPU 数量；
+- global batch size 必须能被并行布局合理切分；
+- 先用 `nvidia-smi` 确认实际 GPU 拓扑；
+- `--overwrite` 会覆盖同名实验目录，只能用于明确重跑；
+- 续训使用 `--resume`，不要同时使用 `--overwrite`。
+
+完整训练输出：
+
+```text
+checkpoints/pi05_bpx_full/bpx_blocks_full/<step>/
+```
+
+## 11. LoRA 微调
+
+先完成第 9 节的 full norm stats，然后：
+
+```bash
+export HF_LEROBOT_HOME=./datasets/lerobot
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+uv run scripts/train.py pi05_bpx_lora \
+  --exp-name=bpx_blocks_lora \
+  --overwrite
+```
+
+LoRA 适合快速确认数据链路，但 BPX 与预训练本体在 7-DoF 双臂、双 JawBlock 输出和主动头部动作上存在差异。最终模型优先以全参数微调的实机成功率为准，不应只根据 LoRA 的训练 loss 决定方案。
+
+## 12. 训练监控与 checkpoint 选择
+
+至少监控：
+
+- training loss 是否持续下降且无 NaN/Inf；
+- 梯度范数是否频繁触发裁剪；
+- 数据加载吞吐和 GPU 利用率；
+- norm stats 是否存在近零范围维度；
+- 生成动作是否在训练分布内；
+- 两个夹爪输出在 `BpxOutputs` 后是否严格相同；
+- 腰部输出是否为固定保持值；
+- 头部动作与左眼画面是否形成合理闭环。
+
+不要仅选择最低训练 loss。每隔固定 checkpoint 在未进入训练的场景中评测，记录：
+
+- 完整任务成功率；
+- 单块抓取成功率；
+- 掉落率、碰撞率和超时率；
+- 平均完成时间；
+- 不同颜色、位置、数量条件下的分项成功率。
+
+使用另行采集的固定真实场景评测各 checkpoint，并保持场景与重复次数一致。当前 59 条训练 episode 不自行留出或重分组。
+
+## 13. 启动 policy server
+
+先离线加载 checkpoint 并执行一次推理；该 smoke test 会检查 `(30,23)`、有限值、腰部保持值和两对相等的夹爪槽位：
+
+```bash
+uv run examples/bpx/smoke_test_bpx_checkpoint.py \
+  --config-name pi05_bpx_full \
+  --checkpoint-dir checkpoints/pi05_bpx_full/bpx_blocks_full_pilot/<step>
+```
+
+全参数 checkpoint：
+
+```bash
+uv run scripts/serve_policy.py policy:checkpoint \
+  --policy.config=pi05_bpx_full \
+  --policy.dir=checkpoints/pi05_bpx_full/bpx_blocks_full/<step>
+```
+
+LoRA checkpoint：
+
+```bash
+uv run scripts/serve_policy.py policy:checkpoint \
+  --policy.config=pi05_bpx_lora \
+  --policy.dir=checkpoints/pi05_bpx_lora/bpx_blocks_lora/<step>
+```
+
+本工程不实现机器人侧控制。部署项目向 policy 发送：
+
+```text
+qpos:   23 维原始顺序，或已经完成腰部删除和夹爪求和的 18 维顺序
+images:
+  left_eye
+  left_wrist
+  right_wrist
+prompt: 任务指令
+```
+
+policy 返回：
+
+```text
+actions: (30, 23)
+```
+
+其中原始索引 `0:3` 为腰部保持值；每个物理夹爪值已除以 2 并写入两个原始槽位，因此对应两槽之和等于策略的一维夹爪输出；头部动作位于原始索引 `21:23`。
+
+## 14. 文件说明
+
+| 文件 | 作用 |
+|---|---|
+| `src/openpi/policies/bpx_constants.py` | 唯一的关节顺序、维度、相机、频率和 18↔23 维规则 |
+| `src/openpi/policies/bpx_policy.py` | 三路图像映射、输入压缩和输出恢复 |
+| `src/openpi/policies/bpx_policy_test.py` | 关节顺序、腰部恢复、夹爪成对和图像映射测试 |
+| `src/openpi/training/bpx_config_test.py` | full/LoRA 配置加载、transform 顺序、delta 往返和 Pad32 测试 |
+| `src/openpi/training/config.py` | `LeRobotBpxDataConfig`、full 和 LoRA 配置 |
+| `examples/bpx/bpx_data.py` | HDF5 schema 与严格校验公共逻辑 |
+| `examples/bpx/clean_bpx_hdf5.py` | 不覆盖原始文件的 qpos 毛刺清洗与审计报告 |
+| `examples/bpx/validate_bpx_hdf5.py` | 转换前数据质量检查 |
+| `examples/bpx/preview_bpx_images.py` | RGB/BGR 四相机预览 |
+| `examples/bpx/convert_bpx_data_to_lerobot.py` | HDF5 → LeRobot v2.1 |
+| `examples/bpx/validate_bpx_lerobot.py` | 转换后计数、字段、顺序、18D 数值与 RGB 抽检 |
+| `examples/bpx/inspect_bpx_norm_stats.py` | 打印并检查全部 18 维归一化统计 |
+| `examples/bpx/smoke_test_bpx_checkpoint.py` | checkpoint 离线推理与 23D 输出契约检查 |
+
+## 15. 长训练前验收清单
+
+- [ ] OpenPI 提交与本工程记录一致。
+- [ ] `pi05_base/params` 已放在相对目录且未被训练输出覆盖。
+- [ ] 训练目录只含成功或最终成功恢复的 episode。
+- [ ] 训练使用清洗副本，`cleaning_audit.csv` 已人工抽查且原始数据仍保留。
+- [ ] 四路图像、qpos、action 均为 30 Hz 对齐。
+- [ ] RGB/BGR 已通过预览人工确认。
+- [ ] HDF5 校验器全部通过。
+- [ ] Ruff、BPX pytest 和配置加载测试全部通过。
+- [ ] 单 episode LeRobot pilot 转换与验收通过。
+- [ ] LeRobot `repo_id` 与两个训练配置一致。
+- [ ] 全量转换严格验收为 59 条、67,455 帧，18D 数值和 RGB 抽检通过。
+- [ ] norm stats 在最终训练数据上重新计算。
+- [ ] 18 维 state/action 的 q01、q99、mean、std 已逐维检查。
+- [ ] 先完成短训练并验证能正常保存、加载和 serve。
+- [ ] checkpoint 离线 smoke 输出为 `(30,23)`，腰部、夹爪和头部契约正确。
+- [ ] 再运行全参数长训练。
+- [ ] checkpoint 通过独立场景实机成功率选择。

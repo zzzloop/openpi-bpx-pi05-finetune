@@ -18,6 +18,8 @@ import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
+import openpi.policies.bpx_constants as bpx_constants
+import openpi.policies.bpx_policy as bpx_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
@@ -269,6 +271,54 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
 
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
 
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotBpxDataConfig(DataConfigFactory):
+    """Data pipeline for aligned BPX HDF5 demonstrations converted to LeRobot."""
+
+    use_delta_joint_actions: bool = True
+    default_prompt: str | None = bpx_constants.BPX_DEFAULT_PROMPT
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "left_eye": "observation.images.left_eye",
+                            "left_wrist": "observation.images.left_wrist",
+                            "right_wrist": "observation.images.right_wrist",
+                        },
+                        "qpos": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[bpx_policy.BpxInputs()],
+            outputs=[bpx_policy.BpxOutputs()],
+        )
+        if self.use_delta_joint_actions:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(bpx_constants.BPX_DELTA_ACTION_MASK)],
+                outputs=[_transforms.AbsoluteActions(bpx_constants.BPX_DELTA_ACTION_MASK)],
+            )
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=self.repack_transforms,
@@ -760,6 +810,82 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    #
+    # Fine-tuning BPX20260310 configs.
+    #
+    TrainConfig(
+        name="pi05_bpx_full",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30),
+        data=LeRobotBpxDataConfig(
+            repo_id="bpx/bpx_blocks",
+            assets=AssetsConfig(
+                assets_dir="./assets/pi05_bpx_full",
+                asset_id="bpx/bpx_blocks",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("./checkpoints/pretrained/pi05_base/params"),
+        num_train_steps=20_000,
+        save_interval=1_000,
+        keep_period=5_000,
+        policy_metadata={
+            "fps": bpx_constants.BPX_FPS,
+            "action_horizon": 30,
+            "raw_action_dim": bpx_constants.BPX_RAW_DIM,
+            "effective_action_dim": bpx_constants.BPX_EFFECTIVE_DIM,
+        },
+    ),
+    TrainConfig(
+        name="pi05_bpx_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotBpxDataConfig(
+            repo_id="bpx/bpx_blocks",
+            assets=AssetsConfig(
+                assets_dir="./assets/pi05_bpx_full",
+                asset_id="bpx/bpx_blocks",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        batch_size=128,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("./checkpoints/pretrained/pi05_base/params"),
+        num_train_steps=30_000,
+        save_interval=1_000,
+        keep_period=5_000,
+        policy_metadata={
+            "fps": bpx_constants.BPX_FPS,
+            "action_horizon": 30,
+            "raw_action_dim": bpx_constants.BPX_RAW_DIM,
+            "effective_action_dim": bpx_constants.BPX_EFFECTIVE_DIM,
+        },
     ),
     #
     # Fine-tuning Aloha configs.
