@@ -175,23 +175,45 @@ OpenPI 官方主要测试 Ubuntu 22.04。本项目按 Ubuntu 22.04、256 GB 内�
 /home/kemove/zzk_data/openpi-bpx-pi05-finetune
 ```
 
-先在服务器上完成 GitHub 私密仓库认证，然后克隆并进入仓库根目录：
+若服务器尚未安装基础工具且当前账号具有 `sudo` 权限，先执行：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git git-lfs curl ffmpeg
+git lfs install
+nvidia-smi
+```
+
+`nvidia-smi` 必须能正常列出 GPU；不要在没有确认服务器驱动/CUDA 管理策略的情况下自行更换 NVIDIA 驱动。
+
+先在服务器上完成 GitHub 私密仓库认证，然后连同子模块一起克隆并进入仓库根目录：
 
 ```bash
 mkdir -p ~/zzk_data
 cd ~/zzk_data
-git clone https://github.com/zzzloop/openpi-bpx-pi05-finetune.git
+git clone --recurse-submodules https://github.com/zzzloop/openpi-bpx-pi05-finetune.git
 cd openpi-bpx-pi05-finetune
 REPO_ROOT=~/zzk_data/openpi-bpx-pi05-finetune
 test "$(pwd -P)" = "$(realpath "$REPO_ROOT")"
+git submodule update --init --recursive
 ```
 
-后续所有相对路径命令都必须从该仓库根目录执行。安装项目依赖：
+后续所有相对路径命令都必须从该仓库根目录执行。先按 [uv 官方安装说明](https://docs.astral.sh/uv/getting-started/installation/) 安装 `uv`；Linux 可使用官方安装器：
 
 ```bash
-GIT_LFS_SKIP_SMUDGE=1 uv sync
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source "$HOME/.local/bin/env"
+uv --version
+```
+
+显式使用仓库固定的 Python 3.11，并按锁文件安装依赖：
+
+```bash
+uv python install 3.11
+uv venv --python 3.11
+GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen
 GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
-uv pip install h5py
+uv run python -c "import sys; assert sys.version_info[:2] == (3, 11); print(sys.version)"
 ```
 
 训练使用 JAX。全参数微调是主方案；LoRA 用作低成本对照和快速排错。OpenPI 的 PyTorch 路径需要先转换 checkpoint，且当前不支持 JAX 路径已有的 LoRA、FSDP 和 EMA 组合，因此本 BPX 首版不把 PyTorch 作为主训练路径。
@@ -291,6 +313,18 @@ PY
 
 `clean_bpx_hdf5.py` 只保留用于追溯现有数据是怎样生成的；当前批次不得再次执行它，除非先确认发现了新的数据错误并重新审计。
 
+在转换前运行服务器总门禁。默认要求仓库所在文件系统至少还剩 500 GiB，用于 LeRobot 视频、环境缓存以及带优化器和 EMA 的多个 full checkpoint：
+
+```bash
+df -hT .
+df -ih .
+nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv
+ffmpeg -version | head -n 1
+uv run examples/bpx/preflight_bpx_server.py --repo-root . --min-free-gib 500
+```
+
+该门禁要求 Ubuntu/Linux、Python 3.11、完整子模块、FFmpeg、NVIDIA 驱动、JAX CUDA backend、可用磁盘、完整 base 模型以及 59 条/67,455 帧清洗数据全部同时通过。若磁盘确实无法提供 500 GiB，不要直接降低阈值；应先根据 LeRobot 实际输出和 checkpoint 保留策略重新核算容量。
+
 先运行仓库门禁和 BPX 配置加载检查：
 
 ```bash
@@ -322,7 +356,7 @@ uv run examples/bpx/validate_bpx_hdf5.py \
 - 每条 episode 至少有 30 帧；
 - 报告 action 到 qpos 的最佳反馈延迟和每一有效维度的范围、标准差。
 
-当前 59 条实机数据均为最终成功示教。清洗前共 67,455 帧、约 37.48 分钟。本批次默认参数共修复 439 个 `qpos` 元素、拒绝候选数为 0；对清洗结果再次只读扫描时修复候选数为 0。全量 `action` 与原始数据严格一致，原始/清洗 `qpos` 的差异集合与 `cleaning_audit.csv` 逐点一致。action 到 qpos 的反馈延迟只用于诊断；训练标签仍使用采集端已对齐的同帧 `observation[t]` 与遥操目标 `action[t]`，不额外平移。
+当前 59 条实机数据均为最终成功示教。清洗前共 67,455 帧、约 37.48 分钟。本批次默认参数共修复 439 个 `qpos` 元素、拒绝候选数为 0；对清洗结果再次只读扫描时修复候选数为 0。全量 `action` 与原始数据严格一致，原始/清洗 `qpos` 的差异集合与 `cleaning_audit.csv` 逐点一致。额外只读统计显示 action 完全重复的相邻帧比例为 0，按各维 `q01–q99` 范围归一化后步长不超过 `1e-3` 的近静止转移约占 0.14%，且没有 episode 存在超过 1 秒的首尾近静止段，因此当前不做 idle 过滤。action 到 qpos 的反馈延迟只用于诊断；训练标签仍使用采集端已对齐的同帧 `observation[t]` 与遥操目标 `action[t]`，不额外平移。
 
 ## 7. 转换为 LeRobot v2.1
 
@@ -453,7 +487,62 @@ uv run examples/bpx/inspect_bpx_norm_stats.py \
 
 建议先进行 1,000–5,000 step 的工程验证，再运行完整训练。
 
-单卡：
+### 10.1 训练前确定 JAX 设备、FSDP 与 WandB
+
+任何 full pilot 之前都必须先执行：
+
+```bash
+nvidia-smi --query-gpu=index,name,memory.total --format=csv
+uv run python - <<'PY'
+import jax
+
+print("backend:", jax.default_backend())
+print("device_count:", jax.device_count())
+print("devices:", jax.devices())
+assert jax.default_backend() == "gpu"
+assert 64 % jax.device_count() == 0, "global batch 64 must be divisible by JAX device count"
+PY
+```
+
+OpenPI 官方估计全参数微调单卡需要超过 70 GB 显存。约 196 GB 是总显存，并不能证明单张 GPU 足够：
+
+- 若每张可见 GPU 均有至少约 80 GB，可先设 `FSDP_DEVICES=1`，此时多卡之间做数据并行；
+- 若单卡不足约 80 GB，应选择 `FSDP_DEVICES=2`、`4` 等有效分片数，使一个 FSDP 组的总显存足够；
+- `FSDP_DEVICES` 必须是 `jax.device_count()` 的正因数，且不得大于设备数；
+- global batch 64 必须能被 `jax.device_count()` 整除。若不整除，应通过 `CUDA_VISIBLE_DEVICES` 选择合适数量的 GPU；不要未经重新审计直接修改 batch size。
+
+例如 4 张约 48 GB GPU 可先尝试：
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export FSDP_DEVICES=2
+```
+
+根据服务器真实 GPU 调整上述值，并再次运行 `preflight_bpx_server.py`。不要机械照抄示例。
+
+```bash
+uv run examples/bpx/preflight_bpx_server.py \
+  --repo-root . \
+  --min-free-gib 500 \
+  --fsdp-devices "$FSDP_DEVICES"
+```
+
+这次门禁会同时验证所选 `FSDP_DEVICES` 是当前 JAX device count 的正因数。
+
+训练默认启用 Weights & Biases。二选一完成配置：
+
+```bash
+# 方案 A：在线记录，推荐
+uv run wandb login
+uv run wandb status
+
+# 方案 B：无外网时离线记录
+export WANDB_MODE=offline
+```
+
+如果明确完全不需要 WandB，则给每条训练命令追加 `--no-wandb-enabled`；否则无头服务器可能在 `wandb.init` 阶段阻塞。以下命令默认已经完成在线登录或设置了 `WANDB_MODE=offline`。
+
+### 10.2 运行 5,000-step full pilot
 
 ```bash
 export HF_LEROBOT_HOME=./datasets/lerobot
@@ -461,29 +550,42 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
 uv run scripts/train.py pi05_bpx_full \
   --exp-name=bpx_blocks_full_pilot \
   --num-train-steps=5000 \
+  --fsdp-devices="$FSDP_DEVICES" \
   --overwrite
 ```
 
-pilot 验收必须同时满足：loss 全程有限且总体下降，无 NaN/Inf；日志中的 global batch 为 64；显存和数据吞吐稳定；checkpoint 能保存；使用第 13 节离线 smoke 能重新加载 checkpoint 并得到正确的 23D 输出。任何一项不通过都先排查，不进入长训。
+pilot 验收必须同时满足：loss 全程有限且总体下降，无 NaN/Inf；日志中的 global batch 为 64；显存和数据吞吐稳定；checkpoint 能保存；使用第 13 节的真实 HDF5 离线 smoke 能重新加载 checkpoint 并得到正确的 23D 输出。任何一项不通过都先排查，不进入长训。
 
-pilot 和离线 smoke 通过后，才根据 `nvidia-smi` 显示的实际 GPU 数量与拓扑决定单卡或多卡 FSDP。多卡命令为：
+### 10.3 运行 full 长训练
+
+pilot 和真实数据离线 smoke 通过后，沿用已经验证的 `CUDA_VISIBLE_DEVICES` 与 `FSDP_DEVICES`：
 
 ```bash
 export HF_LEROBOT_HOME=./datasets/lerobot
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
 uv run scripts/train.py pi05_bpx_full \
   --exp-name=bpx_blocks_full \
-  --fsdp-devices=<GPU_COUNT> \
+  --fsdp-devices="$FSDP_DEVICES" \
   --overwrite
 ```
 
 要求：
 
-- `<GPU_COUNT>` 不得大于当前进程可见 GPU 数量；
-- global batch size 必须能被并行布局合理切分；
-- 先用 `nvidia-smi` 确认实际 GPU 拓扑；
+- `jax.device_count() % FSDP_DEVICES == 0`；
+- `64 % jax.device_count() == 0`；
 - `--overwrite` 会覆盖同名实验目录，只能用于明确重跑；
 - 续训使用 `--resume`，不要同时使用 `--overwrite`。
+
+断点续训命令：
+
+```bash
+export HF_LEROBOT_HOME=./datasets/lerobot
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+uv run scripts/train.py pi05_bpx_full \
+  --exp-name=bpx_blocks_full \
+  --fsdp-devices="$FSDP_DEVICES" \
+  --resume
+```
 
 完整训练输出：
 
@@ -500,6 +602,7 @@ export HF_LEROBOT_HOME=./datasets/lerobot
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
 uv run scripts/train.py pi05_bpx_lora \
   --exp-name=bpx_blocks_lora \
+  --fsdp-devices="$FSDP_DEVICES" \
   --overwrite
 ```
 
@@ -530,13 +633,17 @@ LoRA 适合快速确认数据链路，但 BPX 与预训练本体在 7-DoF 双臂
 
 ## 13. 启动 policy server
 
-先离线加载 checkpoint 并执行一次推理；该 smoke test 会检查 `(30,23)`、有限值、腰部保持值和两对相等的夹爪槽位：
+先使用清洗 HDF5 中的真实 RGB、qpos 和任务提示加载 checkpoint 并执行一次推理；该 smoke test 会检查 `(30,23)`、有限值、腰部保持值和两对相等的夹爪槽位：
 
 ```bash
 uv run examples/bpx/smoke_test_bpx_checkpoint.py \
   --config-name pi05_bpx_full \
-  --checkpoint-dir checkpoints/pi05_bpx_full/bpx_blocks_full_pilot/<step>
+  --checkpoint-dir checkpoints/pi05_bpx_full/bpx_blocks_full_pilot/<step> \
+  --episode-path datasets/cleaned_bpx/episode_0.hdf5 \
+  --frame-index 0
 ```
+
+再选择另一条 episode 和中间帧重复一次，防止只验证单一观测。`<step>` 必须替换为 checkpoint 目录中实际保存的数字步骤，不能保留尖括号占位符。
 
 全参数 checkpoint：
 
@@ -584,16 +691,19 @@ actions: (30, 23)
 | `src/openpi/training/config.py` | `LeRobotBpxDataConfig`、full 和 LoRA 配置 |
 | `examples/bpx/bpx_data.py` | HDF5 schema 与严格校验公共逻辑 |
 | `examples/bpx/clean_bpx_hdf5.py` | 不覆盖原始文件的 qpos 毛刺清洗与审计报告 |
+| `examples/bpx/preflight_bpx_server.py` | 服务器软件、GPU/JAX、磁盘、base 与数据总门禁 |
 | `examples/bpx/validate_bpx_hdf5.py` | 转换前数据质量检查 |
 | `examples/bpx/preview_bpx_images.py` | RGB/BGR 四相机预览 |
 | `examples/bpx/convert_bpx_data_to_lerobot.py` | HDF5 → LeRobot v2.1 |
 | `examples/bpx/validate_bpx_lerobot.py` | 转换后计数、字段、顺序、18D 数值与 RGB 抽检 |
 | `examples/bpx/inspect_bpx_norm_stats.py` | 打印并检查全部 18 维归一化统计 |
-| `examples/bpx/smoke_test_bpx_checkpoint.py` | checkpoint 离线推理与 23D 输出契约检查 |
+| `examples/bpx/smoke_test_bpx_checkpoint.py` | 真实 HDF5 checkpoint 离线推理与 23D 输出契约检查 |
 
 ## 15. 长训练前验收清单
 
 - [ ] OpenPI 提交与本工程记录一致。
+- [ ] 子模块、Python 3.11、锁文件依赖、FFmpeg 和 NVIDIA 驱动完整。
+- [ ] 服务器 preflight 通过，JAX backend 为 GPU，磁盘剩余不少于审计阈值。
 - [ ] `pi05_base/params` 已放在相对目录且未被训练输出覆盖。
 - [ ] 训练目录只含成功或最终成功恢复的 episode。
 - [ ] 训练使用清洗副本，`cleaning_audit.csv` 已人工抽查且原始数据仍保留。
@@ -606,7 +716,9 @@ actions: (30, 23)
 - [ ] 全量转换严格验收为 59 条、67,455 帧，18D 数值和 RGB 抽检通过。
 - [ ] norm stats 在最终训练数据上重新计算。
 - [ ] 18 维 state/action 的 q01、q99、mean、std 已逐维检查。
+- [ ] 在 pilot 前根据单卡显存和 JAX device count 确定了有效的 FSDP 分片数。
+- [ ] WandB 已登录、设为 offline，或训练命令明确禁用。
 - [ ] 先完成短训练并验证能正常保存、加载和 serve。
-- [ ] checkpoint 离线 smoke 输出为 `(30,23)`，腰部、夹爪和头部契约正确。
+- [ ] checkpoint 使用至少两条真实 HDF5 观测完成离线 smoke，输出为 `(30,23)`，腰部、夹爪和头部契约正确。
 - [ ] 再运行全参数长训练。
 - [ ] checkpoint 通过独立场景实机成功率选择。

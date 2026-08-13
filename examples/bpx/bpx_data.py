@@ -89,6 +89,29 @@ def select_episodes(files: list[pathlib.Path], episodes: list[int] | None) -> li
     return selected
 
 
+def read_policy_observation(
+    episode_path: pathlib.Path,
+    frame_index: int,
+    *,
+    default_task: str = bpx_constants.BPX_DEFAULT_PROMPT,
+) -> tuple[dict[str, Any], int]:
+    """Read one real BPX observation in the runtime policy input format."""
+    summary = validate_episode(episode_path)
+    resolved_index = frame_index if frame_index >= 0 else summary.frames + frame_index
+    if not 0 <= resolved_index < summary.frames:
+        raise IndexError(f"frame_index {frame_index} is outside episode length {summary.frames}.")
+    with h5py.File(episode_path, "r") as episode:
+        observation = {
+            "qpos": np.asarray(episode[QPOS_KEY][resolved_index], dtype=np.float32),
+            "images": {
+                camera: np.asarray(episode[IMAGE_DATASET_KEYS[camera]][resolved_index])
+                for camera in bpx_constants.BPX_IMAGE_KEYS
+            },
+            "prompt": read_task(episode, default_task),
+        }
+    return observation, resolved_index
+
+
 def _require_dataset(group: h5py.File, key: str, path: pathlib.Path) -> h5py.Dataset:
     if key not in group:
         raise ValueError(f"{path}: missing HDF5 dataset '{key}'.")

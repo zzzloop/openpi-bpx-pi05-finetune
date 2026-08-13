@@ -37,3 +37,22 @@ def test_select_episodes_preserves_natural_order_and_rejects_missing():
     assert bpx_data.select_episodes(files, [10, 2]) == files
     with pytest.raises(FileNotFoundError, match=r"\[3\]"):
         bpx_data.select_episodes(files, [3])
+
+
+def test_read_policy_observation_uses_real_frame_and_drops_right_eye(tmp_path: pathlib.Path):
+    path = tmp_path / "episode_0.hdf5"
+    frames = 2
+    with h5py.File(path, "w") as episode:
+        episode.create_dataset("observations/qpos", data=np.arange(frames * 23, dtype=np.float32).reshape(frames, 23))
+        episode.create_dataset("action", data=np.zeros((frames, 23), dtype=np.float32))
+        episode.create_dataset("task", data="Put the blocks in the bucket.")
+        for index, key in enumerate(bpx_data.IMAGE_DATASET_KEYS.values()):
+            episode.create_dataset(key, shape=(frames, 360, 640, 3), dtype=np.uint8, fillvalue=index)
+
+    observation, resolved_index = bpx_data.read_policy_observation(path, -1)
+
+    assert resolved_index == 1
+    np.testing.assert_array_equal(observation["qpos"], np.arange(23, 46, dtype=np.float32))
+    assert set(observation["images"]) == {"left_eye", "left_wrist", "right_wrist"}
+    assert "right_eye" not in observation["images"]
+    assert observation["prompt"] == "Put the blocks in the bucket."

@@ -2,22 +2,29 @@
 
 import pathlib
 
+import bpx_data
 import numpy as np
 import tyro
 
 from openpi.policies import bpx_constants
-from openpi.policies import bpx_policy
 from openpi.policies import policy_config
 from openpi.training import config as config_module
 
 
-def main(config_name: str, checkpoint_dir: pathlib.Path) -> None:
-    """Load a full or LoRA checkpoint and validate its restored 23-D action contract."""
+def main(
+    config_name: str,
+    checkpoint_dir: pathlib.Path,
+    episode_path: pathlib.Path,
+    *,
+    frame_index: int = 0,
+) -> None:
+    """Run a real HDF5 observation through a full or LoRA checkpoint."""
     if config_name not in {"pi05_bpx_full", "pi05_bpx_lora"}:
         raise ValueError("config_name must be 'pi05_bpx_full' or 'pi05_bpx_lora'.")
+    observation, resolved_index = bpx_data.read_policy_observation(episode_path, frame_index)
     train_config = config_module.get_config(config_name)
     policy = policy_config.create_trained_policy(train_config, checkpoint_dir)
-    result = policy.infer(bpx_policy.make_bpx_example())
+    result = policy.infer(observation)
     actions = np.asarray(result.get("actions"))
     expected_shape = (train_config.model.action_horizon, bpx_constants.BPX_RAW_DIM)
     if actions.shape != expected_shape:
@@ -42,7 +49,8 @@ def main(config_name: str, checkpoint_dir: pathlib.Path) -> None:
 
     effective = bpx_constants.to_effective_joints(actions)
     print(
-        f"PASS: config={config_name}, output_shape={actions.shape}, effective_shape={effective.shape}, "
+        f"PASS: config={config_name}, episode={episode_path.name}, frame={resolved_index}, "
+        f"prompt={observation['prompt']!r}, output_shape={actions.shape}, effective_shape={effective.shape}, "
         f"finite={np.isfinite(actions).all()}, head_shape={actions[:, 21:23].shape}"
     )
 
