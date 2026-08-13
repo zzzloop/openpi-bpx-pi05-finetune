@@ -169,7 +169,24 @@ Place all the colored blocks on the table into the bucket.
 
 OpenPI 官方主要测试 Ubuntu 22.04。本项目按 Ubuntu 22.04、256 GB 内存和约 196 GB 总显存设计。
 
-在服务器克隆修改后的仓库并进入仓库根目录：
+服务器用户名固定为 `kemove`，工作区固定为 `~/zzk_data`，仓库根目录固定为：
+
+```text
+/home/kemove/zzk_data/openpi-bpx-pi05-finetune
+```
+
+先在服务器上完成 GitHub 私密仓库认证，然后克隆并进入仓库根目录：
+
+```bash
+mkdir -p ~/zzk_data
+cd ~/zzk_data
+git clone https://github.com/zzzloop/openpi-bpx-pi05-finetune.git
+cd openpi-bpx-pi05-finetune
+REPO_ROOT=~/zzk_data/openpi-bpx-pi05-finetune
+test "$(pwd -P)" = "$(realpath "$REPO_ROOT")"
+```
+
+后续所有相对路径命令都必须从该仓库根目录执行。安装项目依赖：
 
 ```bash
 GIT_LFS_SKIP_SMUDGE=1 uv sync
@@ -181,12 +198,16 @@ uv pip install h5py
 
 ## 5. 放置 π0.5 base
 
-复制完整的官方 `pi05_base` checkpoint 到：
+`pi05_base` 不进入 Git。当前本机源目录约为 11.59 GiB、33 个文件；必须把整个目录（包括 `params/`、`assets/`、根目录隐藏元数据和 README）手工复制到服务器：
 
 ```text
-checkpoints/pretrained/pi05_base/
+/home/kemove/zzk_data/openpi-bpx-pi05-finetune/checkpoints/pretrained/pi05_base/
 ├── params/
-└── assets/          # 如果所复制 checkpoint 包含此目录，也一并保留
+├── assets/
+├── .mdl
+├── .msc
+├── .mv
+└── README.md
 ```
 
 两个 BPX 配置都使用相对路径：
@@ -195,7 +216,23 @@ checkpoints/pretrained/pi05_base/
 ./checkpoints/pretrained/pi05_base/params
 ```
 
-不要只复制目录中的某几个文件，也不要把训练输出写入 `checkpoints/pretrained/`。BPX 训练 checkpoint 会写到独立的：
+先在仓库根目录创建父目录：
+
+```bash
+mkdir -p checkpoints/pretrained
+```
+
+复制完成后的正确结构是 `checkpoints/pretrained/pi05_base/params`，不能出现错误的双层结构 `checkpoints/pretrained/pi05_base/pi05_base/params`。复制后执行：
+
+```bash
+test -d checkpoints/pretrained/pi05_base/params
+test -d checkpoints/pretrained/pi05_base/assets
+test -f checkpoints/pretrained/pi05_base/params/_CHECKPOINT_METADATA
+test -f checkpoints/pretrained/pi05_base/params/manifest.ocdbt
+du -sh checkpoints/pretrained/pi05_base
+```
+
+不要只复制 checkpoint 中的某几个文件，也不要把训练输出写入 `checkpoints/pretrained/`。BPX 训练 checkpoint 会写到独立的：
 
 ```text
 checkpoints/pi05_bpx_full/...
@@ -204,15 +241,23 @@ checkpoints/pi05_bpx_lora/...
 
 ## 6. 放置并验证已清洗数据
 
-当前 59 条训练轨迹已经完成清洗和逐元素审计，不要在服务器重新清洗。将完整的已清洗目录复制到项目内的相对位置：
+当前 59 条训练轨迹已经完成清洗和逐元素审计，不要在服务器重新清洗。当前本机清洗目录约为 106.30 GiB、120 个文件；必须把整个 `bpx_real_hdf5_cleaned` 目录手工复制到服务器，并在目标端命名为 `cleaned_bpx`：
 
 ```text
-datasets/
-├── cleaned_bpx/         # 已清洗的 59 条训练 episode 及审计文件
-└── lerobot/
+/home/kemove/zzk_data/openpi-bpx-pi05-finetune/datasets/cleaned_bpx/
+├── episode_0.hdf5 ... episode_58.hdf5
+├── cleaning_audit.csv
+├── cleaning_summary.json
+└── .cleaning_records/
 ```
 
-复制完成后应同时存在：
+先在仓库根目录创建父目录：
+
+```bash
+mkdir -p datasets
+```
+
+复制完成后的正确结构是 `datasets/cleaned_bpx/episode_0.hdf5`，不能出现错误的双层结构 `datasets/cleaned_bpx/bpx_real_hdf5_cleaned/episode_0.hdf5`。以下内容必须全部存在：
 
 ```text
 datasets/cleaned_bpx/cleaning_audit.csv
@@ -220,6 +265,29 @@ datasets/cleaned_bpx/cleaning_summary.json
 datasets/cleaned_bpx/.cleaning_records/
 datasets/cleaned_bpx/episode_*.hdf5
 ```
+
+复制后在仓库根目录执行完整性验收：
+
+```bash
+test "$(find datasets/cleaned_bpx -maxdepth 1 -type f -name 'episode_*.hdf5' | wc -l)" -eq 59
+test "$(find datasets/cleaned_bpx/.cleaning_records -maxdepth 1 -type f -name 'episode_*.json' | wc -l)" -eq 59
+test -f datasets/cleaned_bpx/cleaning_audit.csv
+test -f datasets/cleaned_bpx/cleaning_summary.json
+du -sh datasets/cleaned_bpx
+uv run python - <<'PY'
+import json
+from pathlib import Path
+
+summary = json.loads(Path("datasets/cleaned_bpx/cleaning_summary.json").read_text(encoding="utf-8"))
+assert summary["episode_count"] == 59, summary["episode_count"]
+assert summary["frame_count"] == 67_455, summary["frame_count"]
+assert summary["repair_count"] == 439, summary["repair_count"]
+assert summary["rejected_candidate_count"] == 0, summary["rejected_candidate_count"]
+print("PASS: 59 episodes, 67,455 frames, 439 audited qpos repairs")
+PY
+```
+
+只需要手工复制上述 `pi05_base` 和 `cleaned_bpx` 两个大目录。以下内容不要从本机复制：原始 E 盘数据、URDF 资源、LeRobot 转换结果、norm stats、训练 checkpoint 和 WandB 日志；这些内容不属于服务器初始化输入，或会在服务器训练流程中重新生成。
 
 `clean_bpx_hdf5.py` 只保留用于追溯现有数据是怎样生成的；当前批次不得再次执行它，除非先确认发现了新的数据错误并重新审计。
 
