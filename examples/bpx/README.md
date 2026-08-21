@@ -1,5 +1,8 @@
 # BPX π0.5 真机数据微调工程
 
+两张 48 GiB GPU（物理 GPU `2,3`）的简洁训练命令见
+[`TRAINING_2X48GB_QUICKSTART.md`](TRAINING_2X48GB_QUICKSTART.md)。
+
 本目录把已经对齐的 BPX 遥操 HDF5 数据转换为 OpenPI 使用的 LeRobot v2.1 数据集，并提供 π0.5 全参数微调与 JAX LoRA 微调配置。范围只包括数据检查、转换、训练和模型输出适配；不包含实机控制接口，也不包含仿真。
 
 实现基于 OpenPI 提交 `15a9616a00943ada6c20a0f158e3adb39df2ccac`，遵循官方的“转换为 LeRobot → 定义机器人输入/输出变换 → 计算 norm stats → 微调 → policy server”流程：
