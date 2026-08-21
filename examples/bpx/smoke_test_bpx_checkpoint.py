@@ -11,6 +11,33 @@ from openpi.policies import policy_config
 from openpi.training import config as config_module
 
 
+def validate_output_contract(actions: np.ndarray, expected_shape: tuple[int, int]) -> None:
+    if actions.shape != expected_shape:
+        raise ValueError(f"Expected checkpoint output shape {expected_shape}, got {actions.shape}.")
+    if not np.isfinite(actions).all():
+        raise ValueError("Checkpoint output contains NaN or infinity.")
+
+    waist_actions = actions[:, : bpx_constants.BPX_WAIST_DIM]
+    expected_waist = np.broadcast_to(
+        np.asarray(bpx_constants.BPX_DEFAULT_WAIST_POSITION, dtype=waist_actions.dtype), waist_actions.shape
+    )
+    np.testing.assert_allclose(
+        waist_actions,
+        expected_waist,
+        rtol=0.0,
+        atol=1e-7,
+        err_msg="Frozen waist output does not match the configured hold position.",
+    )
+    for first, second in bpx_constants.BPX_RAW_GRIPPER_PAIRS:
+        np.testing.assert_allclose(
+            actions[:, first],
+            actions[:, second],
+            rtol=0.0,
+            atol=1e-7,
+            err_msg=f"Gripper slots {first}/{second} are not equal halves of the physical command.",
+        )
+
+
 def main(
     config_name: str,
     checkpoint_dir: pathlib.Path,
@@ -28,25 +55,7 @@ def main(
     result = policy.infer(observation)
     actions = np.asarray(result.get("actions"))
     expected_shape = (train_config.model.action_horizon, bpx_constants.BPX_RAW_DIM)
-    if actions.shape != expected_shape:
-        raise ValueError(f"Expected checkpoint output shape {expected_shape}, got {actions.shape}.")
-    if not np.isfinite(actions).all():
-        raise ValueError("Checkpoint output contains NaN or infinity.")
-    np.testing.assert_allclose(
-        actions[:, : bpx_constants.BPX_WAIST_DIM],
-        np.asarray(bpx_constants.BPX_DEFAULT_WAIST_POSITION),
-        rtol=0.0,
-        atol=1e-7,
-        err_msg="Frozen waist output does not match the configured hold position.",
-    )
-    for first, second in bpx_constants.BPX_RAW_GRIPPER_PAIRS:
-        np.testing.assert_allclose(
-            actions[:, first],
-            actions[:, second],
-            rtol=0.0,
-            atol=1e-7,
-            err_msg=f"Gripper slots {first}/{second} are not equal halves of the physical command.",
-        )
+    validate_output_contract(actions, expected_shape)
 
     effective = bpx_constants.to_effective_joints(actions)
     print(
