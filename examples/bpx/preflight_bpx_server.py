@@ -29,6 +29,7 @@ def main(
     *,
     min_free_gib: float = 500.0,
     fsdp_devices: int | None = None,
+    batch_size: int = 64,
 ) -> None:
     """Validate software, GPU, disk, base checkpoint, and cleaned data prerequisites."""
     repo_root = repo_root.resolve()
@@ -104,9 +105,11 @@ def main(
     )
     device_count = jax.device_count()
     fsdp_candidates = [count for count in range(1, device_count + 1) if device_count % count == 0]
-    if 64 % device_count != 0:
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}.")
+    if batch_size % device_count != 0:
         raise RuntimeError(
-            f"The pi05_bpx_full global batch 64 is not divisible by JAX device count {device_count}; "
+            f"The requested global batch {batch_size} is not divisible by JAX device count {device_count}; "
             "restrict CUDA_VISIBLE_DEVICES or revise the reviewed batch size."
         )
     if fsdp_devices is not None and fsdp_devices not in fsdp_candidates:
@@ -117,6 +120,7 @@ def main(
 
     print(f"PASS: repo_root={repo_root}")
     print(f"PASS: Python={platform.python_version()}, JAX backend={backend}, JAX devices={device_count}")
+    print(f"PASS: global_batch={batch_size} is divisible by JAX devices={device_count}")
     print(f"PASS: free_disk={free_gib:.1f} GiB (required >= {min_free_gib:.1f} GiB)")
     print("NVIDIA inventory (index, name, MiB):")
     print(gpu_inventory)

@@ -15,6 +15,7 @@ from openpi.training import optimizer
     ("config_name", "batch_size", "num_train_steps", "peak_lr", "ema_decay"),
     [
         ("pi05_bpx_full", 64, 20_000, 2.5e-5, 0.999),
+        ("pi05_bpx_full_low_mem", 2, 20_000, 2.5e-5, None),
         ("pi05_bpx_lora", 128, 30_000, 5e-5, None),
     ],
 )
@@ -62,6 +63,19 @@ def test_bpx_train_configs_load_with_expected_contract(
     assert tuple(data_config.data_transforms.inputs[1].mask) == bpx_constants.BPX_DELTA_ACTION_MASK
     assert isinstance(data_config.model_transforms.inputs[-1], transforms.PadStatesAndActions)
     assert data_config.model_transforms.inputs[-1].model_action_dim == 32
+
+
+def test_bpx_low_memory_full_config_only_drops_ema_and_reduces_default_batch():
+    full_config = config_module.get_config("pi05_bpx_full")
+    low_memory_config = config_module.get_config("pi05_bpx_full_low_mem")
+
+    assert low_memory_config.model == full_config.model
+    assert low_memory_config.data == full_config.data
+    assert low_memory_config.lr_schedule == full_config.lr_schedule
+    assert low_memory_config.optimizer == full_config.optimizer
+    assert low_memory_config.weight_loader == full_config.weight_loader
+    assert low_memory_config.ema_decay is None
+    assert low_memory_config.batch_size == 2
 
 
 def test_bpx_data_transform_order_round_trips_absolute_actions(tmp_path: pathlib.Path):

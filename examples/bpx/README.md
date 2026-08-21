@@ -435,7 +435,15 @@ uv run examples/bpx/validate_bpx_lerobot.py \
 - 20,000 steps；
 - EMA 0.999；
 - 本地持久化监控开启：每 100 step 记录标量、每 500 step 绘制训练总览、每 1,000 step 保存三相机和动作目标图；
-- 主方案，适合当前显存条件。
+- 标准全参数方案；OpenPI 官方要求单卡显存大于约 70 GB，必须先通过目标服务器显存门禁。
+
+### `pi05_bpx_full_low_mem`
+
+- 模型、数据、AdamW、学习率、action horizon 和全参数训练范围均与 `pi05_bpx_full` 相同；
+- 默认 global batch size 2，供两张 48 GiB GPU 以 FSDP 2 运行；
+- 关闭 EMA，不在训练状态中维护额外的完整参数副本；
+- checkpoint 自动保存当前训练参数，推理和 23D 输出恢复流程不变；
+- 这是当前两张 48 GiB GPU 上的最后一级 full-finetune 显存试验，仍必须先通过 1-step 门禁，不能保证必然可用。
 
 ### `pi05_bpx_lora`
 
@@ -447,7 +455,7 @@ uv run examples/bpx/validate_bpx_lerobot.py \
 - 使用与 full 相同的本地持久化监控；
 - 用于快速验证、消融和低成本对照。
 
-两个配置使用同一个 LeRobot 数据集。LoRA 配置复用 full 配置计算出的 norm stats，避免重复解码全部视频。
+三个配置使用同一个 LeRobot 数据集。low-memory full 和 LoRA 均复用标准 full 配置计算出的 norm stats，避免重复解码全部视频。
 
 ## 9. 计算归一化统计
 
@@ -526,7 +534,8 @@ export FSDP_DEVICES=2
 uv run examples/bpx/preflight_bpx_server.py \
   --repo-root . \
   --min-free-gib 500 \
-  --fsdp-devices "$FSDP_DEVICES"
+  --fsdp-devices "$FSDP_DEVICES" \
+  --batch-size 64
 ```
 
 这次门禁会同时验证所选 `FSDP_DEVICES` 是当前 JAX device count 的正因数。
@@ -544,7 +553,49 @@ export WANDB_MODE=offline
 
 如果明确完全不需要 WandB，则给每条训练命令追加 `--no-wandb-enabled`；否则无头服务器可能在 `wandb.init` 阶段阻塞。以下命令默认已经完成在线登录或设置了 `WANDB_MODE=offline`。
 
-### 10.2 运行 5,000-step full pilot
+### 10.2 两张 48 GiB GPU：关闭 EMA 的 full 显存门禁
+
+标准 `pi05_bpx_full` 已在两张 48 GiB GPU、FSDP 2、global batch 2、显存比例 0.99 下 OOM 时，改用独立配置
+`pi05_bpx_full_low_mem`。该配置仍更新全部参数，只关闭 EMA。先确认两张卡没有其他计算进程，然后只运行 1 step：
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1
+export HF_LEROBOT_HOME=./datasets/lerobot
+export WANDB_MODE=offline
+
+uv run examples/bpx/preflight_bpx_server.py \
+  --repo-root . \
+  --min-free-gib 200 \
+  --fsdp-devices 2 \
+  --batch-size 2
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.99 \
+uv run scripts/train.py pi05_bpx_full_low_mem \
+  --exp-name=bpx_full_low_mem_gate_bs2 \
+  --batch-size=2 \
+  --num-train-steps=1 \
+  --fsdp-devices=2 \
+  --overwrite
+```
+
+门禁要求：完成第 1 step，且无 `RESOURCE_EXHAUSTED`、NaN 或 Inf。通过后才运行 300-step 稳定性 pilot：
+
+```bash
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.99 \
+uv run scripts/train.py pi05_bpx_full_low_mem \
+  --exp-name=bpx_full_low_mem_pilot_bs2 \
+  --batch-size=2 \
+  --num-train-steps=300 \
+  --fsdp-devices=2 \
+  --overwrite
+```
+
+global batch 从标准配置的 64 降到 2 后，20,000 step 的样本量和学习率日程不再与标准 full 等价。300-step pilot
+只验证显存、数值稳定性、吞吐、监控和 checkpoint；进入长训前必须依据 pilot 重新审定步数及学习率，不得直接把
+20,000 step 当作最终训练量。如果 1-step 仍然 OOM，则当前两张 48 GiB GPU 不支持本工程的全参数训练，转用 LoRA
+或更大显存硬件，不再尝试 global batch 1。
+
+### 10.3 运行 5,000-step 标准 full pilot
 
 ```bash
 export HF_LEROBOT_HOME=./datasets/lerobot
@@ -558,7 +609,7 @@ uv run scripts/train.py pi05_bpx_full \
 
 pilot 验收必须同时满足：loss 全程有限且总体下降，无 NaN/Inf；日志中的 global batch 为 64；显存和数据吞吐稳定；checkpoint 能保存；使用第 13 节的真实 HDF5 离线 smoke 能重新加载 checkpoint 并得到正确的 23D 输出。任何一项不通过都先排查，不进入长训。
 
-### 10.3 运行 full 长训练
+### 10.4 运行标准 full 长训练
 
 pilot 和真实数据离线 smoke 通过后，沿用已经验证的 `CUDA_VISIBLE_DEVICES` 与 `FSDP_DEVICES`：
 
@@ -614,7 +665,7 @@ LoRA 适合快速确认数据链路，但 BPX 与预训练本体在 7-DoF 双臂
 
 ### 12.1 自动保存的监控文件
 
-BPX full 和 LoRA 配置默认开启本地持久化监控。即使设置了 `WANDB_MODE=offline` 或使用
+BPX standard full、low-memory full 和 LoRA 配置默认开启本地持久化监控。即使设置了 `WANDB_MODE=offline` 或使用
 `--no-wandb-enabled`，以下内容仍会写入当前实验 checkpoint 目录：
 
 ```text
@@ -698,6 +749,16 @@ uv run examples/bpx/smoke_test_bpx_checkpoint.py \
   --frame-index 0
 ```
 
+关闭 EMA 的 full checkpoint 将配置名和目录对应替换为：
+
+```bash
+uv run examples/bpx/smoke_test_bpx_checkpoint.py \
+  --config-name pi05_bpx_full_low_mem \
+  --checkpoint-dir checkpoints/pi05_bpx_full_low_mem/bpx_full_low_mem_pilot_bs2/<step> \
+  --episode-path datasets/cleaned_bpx/episode_0.hdf5 \
+  --frame-index 0
+```
+
 再选择另一条 episode 和中间帧重复一次，防止只验证单一观测。`<step>` 必须替换为 checkpoint 目录中实际保存的数字步骤，不能保留尖括号占位符。
 
 全参数 checkpoint：
@@ -706,6 +767,14 @@ uv run examples/bpx/smoke_test_bpx_checkpoint.py \
 uv run scripts/serve_policy.py policy:checkpoint \
   --policy.config=pi05_bpx_full \
   --policy.dir=checkpoints/pi05_bpx_full/bpx_blocks_full/<step>
+```
+
+关闭 EMA 的全参数 checkpoint：
+
+```bash
+uv run scripts/serve_policy.py policy:checkpoint \
+  --policy.config=pi05_bpx_full_low_mem \
+  --policy.dir=checkpoints/pi05_bpx_full_low_mem/bpx_full_low_mem_pilot_bs2/<step>
 ```
 
 LoRA checkpoint：
@@ -742,8 +811,8 @@ actions: (30, 23)
 | `src/openpi/policies/bpx_constants.py` | 唯一的关节顺序、维度、相机、频率和 18↔23 维规则 |
 | `src/openpi/policies/bpx_policy.py` | 三路图像映射、输入压缩和输出恢复 |
 | `src/openpi/policies/bpx_policy_test.py` | 关节顺序、腰部恢复、夹爪成对和图像映射测试 |
-| `src/openpi/training/bpx_config_test.py` | full/LoRA 配置加载、transform 顺序、delta 往返和 Pad32 测试 |
-| `src/openpi/training/config.py` | `LeRobotBpxDataConfig`、full 和 LoRA 配置 |
+| `src/openpi/training/bpx_config_test.py` | standard full/low-memory full/LoRA 配置加载、transform 顺序、delta 往返和 Pad32 测试 |
+| `src/openpi/training/config.py` | `LeRobotBpxDataConfig`、standard full、low-memory full 和 LoRA 配置 |
 | `src/openpi/training/monitoring.py` | 本地 JSONL/CSV、训练曲线、三相机和动作目标持久化监控 |
 | `src/openpi/training/monitoring_test.py` | 监控写入、无头绘图、续训截断和可视化测试 |
 | `examples/bpx/bpx_data.py` | HDF5 schema 与严格校验公共逻辑 |
