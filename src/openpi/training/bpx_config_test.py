@@ -39,6 +39,11 @@ def test_bpx_train_configs_load_with_expected_contract(
     assert train_config.batch_size == batch_size
     assert train_config.num_train_steps == num_train_steps
     assert train_config.ema_decay == ema_decay
+    assert train_config.monitoring_enabled
+    assert train_config.monitoring_plot_interval == 500
+    assert train_config.monitoring_visualization_interval == 1_000
+    assert train_config.monitoring_max_samples == 2
+    assert train_config.monitoring_action_names == bpx_constants.BPX_EFFECTIVE_JOINT_NAMES
     assert isinstance(train_config.lr_schedule, optimizer.CosineDecaySchedule)
     assert train_config.lr_schedule.peak_lr == peak_lr
     assert data_config.repo_id == "bpx/bpx_blocks"

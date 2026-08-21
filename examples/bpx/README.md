@@ -434,6 +434,7 @@ uv run examples/bpx/validate_bpx_lerobot.py \
 - batch size 64；
 - 20,000 steps；
 - EMA 0.999；
+- 本地持久化监控开启：每 100 step 记录标量、每 500 step 绘制训练总览、每 1,000 step 保存三相机和动作目标图；
 - 主方案，适合当前显存条件。
 
 ### `pi05_bpx_lora`
@@ -443,6 +444,7 @@ uv run examples/bpx/validate_bpx_lerobot.py \
 - batch size 128；
 - 30,000 steps；
 - 不使用 EMA；
+- 使用与 full 相同的本地持久化监控；
 - 用于快速验证、消融和低成本对照。
 
 两个配置使用同一个 LeRobot 数据集。LoRA 配置复用 full 配置计算出的 norm stats，避免重复解码全部视频。
@@ -610,6 +612,52 @@ LoRA 适合快速确认数据链路，但 BPX 与预训练本体在 7-DoF 双臂
 
 ## 12. 训练监控与 checkpoint 选择
 
+### 12.1 自动保存的监控文件
+
+BPX full 和 LoRA 配置默认开启本地持久化监控。即使设置了 `WANDB_MODE=offline` 或使用
+`--no-wandb-enabled`，以下内容仍会写入当前实验 checkpoint 目录：
+
+```text
+checkpoints/<config>/<exp-name>/monitoring/
+├── metrics.jsonl
+├── metrics.csv
+├── training_overview_latest.png
+├── plots/
+│   └── training_overview_step_*.png
+├── camera_views/
+│   └── camera_step_*.png
+└── action_targets/
+    └── action_target_step_*.png
+```
+
+- `metrics.jsonl`：完整机器可读记录，包含 loss、区间 loss 标准差/最小/最大值、30 个 horizon 的 loss、
+  gradient/update/parameter norm、学习率、训练吞吐和 UTC 时间；续训时会继续追加。
+- `metrics.csv`：便于直接用表格软件检查的标量记录。
+- `training_overview_step_*.png`：每 500 step 保存一次六联图，包括 loss 及移动均值、loss 区间、
+  gradient/update norm、parameter norm、学习率、吞吐和各 action-horizon 位置的 loss。
+- `camera_step_*.png`：每 1,000 step 保存进入模型随机增强前的三路 resize-with-pad 图像，用于发现相机错位、
+  黑屏、颜色错误和 padding 异常；训练时模型内部仍会执行随机裁剪/旋转（非腕部）和颜色增强。
+- `action_target_step_*.png`：每 1,000 step 分三组保存模型空间中前 18 维动作标签曲线，并使用 BPX 有效关节名标注。
+  这里展示的是归一化后的 delta/absolute 混合训练标签，不是模型预测，也不是可直接下发真机的 23D 动作。
+
+同一批图像会同步到 W&B；W&B 还会自动采集 GPU 利用率、显存、温度和系统资源。离线训练结束且恢复网络后可执行：
+
+```bash
+uv run wandb sync wandb/offline-run-*
+```
+
+默认间隔已经避免在 JIT 热路径中绘图。若确需调整，可在训练命令中显式覆盖：
+
+```bash
+--monitoring-plot-interval=500 \
+--monitoring-visualization-interval=1000 \
+--monitoring-max-samples=2
+```
+
+不建议把图像间隔降低到 100 step：频繁把分片 batch 从 GPU 取回并编码 PNG 会降低训练吞吐。
+
+### 12.2 判读要求
+
 至少监控：
 
 - training loss 是否持续下降且无 NaN/Inf；
@@ -620,6 +668,13 @@ LoRA 适合快速确认数据链路，但 BPX 与预训练本体在 7-DoF 双臂
 - 两个夹爪输出在 `BpxOutputs` 后是否严格相同；
 - 腰部输出是否为固定保持值；
 - 头部动作与左眼画面是否形成合理闭环。
+
+训练循环每 100 step 检查一次全部指标，发现 NaN 或 Inf 会在写入本地/W&B 记录后自动抛错停止。出现以下任一情况也应
+立即停止训练并排查：loss 长时间突然抬升且无法恢复；
+gradient norm 持续异常增大；吞吐突然明显下降；三相机出现黑屏、串流、颜色反转或视角不一致。
+
+本地曲线和 W&B 只能判断训练健康度。动作目标图不能证明策略已学会任务；checkpoint 的实际能力仍必须通过第 13 节的
+真实 HDF5 smoke、离线预测误差以及独立实机场景成功率验证。
 
 不要仅选择最低训练 loss。每隔固定 checkpoint 在未进入训练的场景中评测，记录：
 
@@ -689,6 +744,8 @@ actions: (30, 23)
 | `src/openpi/policies/bpx_policy_test.py` | 关节顺序、腰部恢复、夹爪成对和图像映射测试 |
 | `src/openpi/training/bpx_config_test.py` | full/LoRA 配置加载、transform 顺序、delta 往返和 Pad32 测试 |
 | `src/openpi/training/config.py` | `LeRobotBpxDataConfig`、full 和 LoRA 配置 |
+| `src/openpi/training/monitoring.py` | 本地 JSONL/CSV、训练曲线、三相机和动作目标持久化监控 |
+| `src/openpi/training/monitoring_test.py` | 监控写入、无头绘图、续训截断和可视化测试 |
 | `examples/bpx/bpx_data.py` | HDF5 schema 与严格校验公共逻辑 |
 | `examples/bpx/clean_bpx_hdf5.py` | 不覆盖原始文件的 qpos 毛刺清洗与审计报告 |
 | `examples/bpx/preflight_bpx_server.py` | 服务器软件、GPU/JAX、磁盘、base 与数据总门禁 |
@@ -718,6 +775,7 @@ actions: (30, 23)
 - [ ] 18 维 state/action 的 q01、q99、mean、std 已逐维检查。
 - [ ] 在 pilot 前根据单卡显存和 JAX device count 确定了有效的 FSDP 分片数。
 - [ ] WandB 已登录、设为 offline，或训练命令明确禁用。
+- [ ] pilot 的 `monitoring/` 已生成 JSONL、CSV、总览、三相机和动作目标图，并人工检查无异常。
 - [ ] 先完成短训练并验证能正常保存、加载和 serve。
 - [ ] checkpoint 使用至少两条真实 HDF5 观测完成离线 smoke，输出为 `(30,23)`，腰部、夹爪和头部契约正确。
 - [ ] 再运行全参数长训练。

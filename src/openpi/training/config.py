@@ -575,6 +575,16 @@ class TrainConfig:
     # If true, will enable wandb logging.
     wandb_enabled: bool = True
 
+    # Durable local monitoring is opt-in so upstream configs keep their existing behavior.
+    monitoring_enabled: bool = False
+    # Render scalar-history plots at this step interval.
+    monitoring_plot_interval: int = 500
+    # Save model-space camera and action-target visualizations at this step interval.
+    monitoring_visualization_interval: int = 1_000
+    monitoring_max_samples: int = 2
+    # Optional labels for the unpadded model action dimensions.
+    monitoring_action_names: tuple[str, ...] = ()
+
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
 
@@ -604,6 +614,12 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
+        if self.monitoring_enabled and (
+            self.monitoring_plot_interval <= 0
+            or self.monitoring_visualization_interval <= 0
+            or self.monitoring_max_samples <= 0
+        ):
+            raise ValueError("Monitoring intervals and sample count must be positive.")
 
 
 # Use `get_config` if you need to get a config by name in your code.
@@ -838,6 +854,11 @@ _CONFIGS = [
         num_train_steps=20_000,
         save_interval=1_000,
         keep_period=5_000,
+        monitoring_enabled=True,
+        monitoring_plot_interval=500,
+        monitoring_visualization_interval=1_000,
+        monitoring_max_samples=2,
+        monitoring_action_names=bpx_constants.BPX_EFFECTIVE_JOINT_NAMES,
         policy_metadata={
             "fps": bpx_constants.BPX_FPS,
             "action_horizon": 30,
@@ -880,6 +901,11 @@ _CONFIGS = [
         num_train_steps=30_000,
         save_interval=1_000,
         keep_period=5_000,
+        monitoring_enabled=True,
+        monitoring_plot_interval=500,
+        monitoring_visualization_interval=1_000,
+        monitoring_max_samples=2,
+        monitoring_action_names=bpx_constants.BPX_EFFECTIVE_JOINT_NAMES,
         policy_metadata={
             "fps": bpx_constants.BPX_FPS,
             "action_horizon": 30,

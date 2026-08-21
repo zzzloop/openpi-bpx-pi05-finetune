@@ -22,6 +22,7 @@ import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.checkpoints as _checkpoints
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
+import openpi.training.monitoring as _monitoring
 import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
@@ -148,14 +149,22 @@ def train_step(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
         chunked_loss = model.compute_loss(rng, observation, actions, train=True)
-        return jnp.mean(chunked_loss)
+        horizon_reduce_axes = tuple(range(chunked_loss.ndim - 1))
+        return jnp.mean(chunked_loss), {
+            "loss_std": jnp.std(chunked_loss),
+            "loss_min": jnp.min(chunked_loss),
+            "loss_max": jnp.max(chunked_loss),
+            "loss_by_horizon": jnp.mean(chunked_loss, axis=horizon_reduce_axes),
+        }
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    (loss, loss_metrics), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
+        model, train_rng, observation, actions
+    )
 
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -185,8 +194,11 @@ def train_step(
     )
     info = {
         "loss": loss,
+        **loss_metrics,
         "grad_norm": optax.global_norm(grads),
+        "update_norm": optax.global_norm(updates),
         "param_norm": optax.global_norm(kernel_params),
+        "learning_rate": config.lr_schedule.create()(state.step),
     }
     return new_state, info
 
@@ -226,12 +238,23 @@ def main(config: _config.TrainConfig):
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
-    # Log images from first batch to sanity check.
-    images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
-    ]
-    wandb.log({"camera_views": images_to_log}, step=0)
+    monitor = None
+    if config.monitoring_enabled:
+        monitor = _monitoring.TrainingMonitor(
+            config.checkpoint_dir / "monitoring",
+            batch_size=config.batch_size,
+            plot_interval=config.monitoring_plot_interval,
+            visualization_interval=config.monitoring_visualization_interval,
+            action_names=config.monitoring_action_names,
+        )
+        logging.info(f"Durable training monitoring enabled at {monitor.output_dir}")
+    else:
+        # Preserve the upstream first-batch W&B sanity check for configs that have not opted into durable monitoring.
+        images_to_log = [
+            wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
+            for i in range(min(5, len(next(iter(batch[0].images.values())))))
+        ]
+        wandb.log({"camera_views": images_to_log}, step=0)
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     jax.block_until_ready(train_state)
@@ -248,6 +271,8 @@ def main(config: _config.TrainConfig):
     )
 
     start_step = int(train_state.step)
+    if monitor is not None:
+        monitor.prepare_resume(start_step)
     pbar = tqdm.tqdm(
         range(start_step, config.num_train_steps),
         initial=start_step,
@@ -256,22 +281,66 @@ def main(config: _config.TrainConfig):
     )
 
     infos = []
+
+    def flush_metrics(step: int, visualized_batch, *, final: bool = False) -> None:
+        nonlocal infos
+        if not infos:
+            return
+        stacked_infos = common_utils.stack_forest(infos)
+        reduced_info = {
+            key: jnp.mean(value, axis=0) if key == "loss_by_horizon" else jnp.mean(value)
+            for key, value in stacked_infos.items()
+        }
+        reduced_info = jax.device_get(reduced_info)
+        scalar_info = {key: value for key, value in reduced_info.items() if np.asarray(value).ndim == 0}
+        info_str = ", ".join(f"{key}={float(value):.4g}" for key, value in scalar_info.items())
+        pbar.write(f"Step {step}: {info_str}")
+
+        wandb_payload = dict(scalar_info)
+        loss_by_horizon = np.asarray(reduced_info["loss_by_horizon"])
+        wandb_payload.update(
+            {f"loss_by_horizon/{index:02d}": float(value) for index, value in enumerate(loss_by_horizon)}
+        )
+        nonfinite_metrics = [key for key, value in reduced_info.items() if not np.isfinite(np.asarray(value)).all()]
+        if monitor is not None:
+            plot_paths = monitor.log_metrics(step, reduced_info, force_plot=final)
+            if plot_paths:
+                wandb_payload["monitor/training_overview"] = wandb.Image(str(plot_paths[0]))
+            if final or monitor.should_visualize(step):
+                sample_count = config.monitoring_max_samples
+                host_images = {
+                    name: np.asarray(jax.device_get(image[:sample_count]))
+                    for name, image in visualized_batch[0].images.items()
+                }
+                host_actions = np.asarray(jax.device_get(visualized_batch[1][:sample_count]))
+                visual_paths = monitor.save_batch_visualizations(
+                    step,
+                    host_images,
+                    host_actions,
+                    max_samples=sample_count,
+                )
+                wandb_payload["monitor/camera_views"] = wandb.Image(str(visual_paths[0]))
+                if len(visual_paths) > 1:
+                    wandb_payload["monitor/action_targets"] = wandb.Image(str(visual_paths[1]))
+        wandb.log(wandb_payload, step=step)
+        infos = []
+        if nonfinite_metrics:
+            raise FloatingPointError(f"Non-finite training metrics at step {step}: {nonfinite_metrics}")
+
+    last_trained_batch = batch
     for step in pbar:
+        last_trained_batch = batch
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
         infos.append(info)
         if step % config.log_interval == 0:
-            stacked_infos = common_utils.stack_forest(infos)
-            reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
-            info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
-            pbar.write(f"Step {step}: {info_str}")
-            wandb.log(reduced_info, step=step)
-            infos = []
+            flush_metrics(step, last_trained_batch)
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
 
+    flush_metrics(config.num_train_steps - 1, last_trained_batch, final=True)
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()
 
