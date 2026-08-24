@@ -827,6 +827,37 @@ actions: (30, 23)
 | `examples/bpx/validate_bpx_lerobot.py` | 转换后计数、字段、顺序、18D 数值与 RGB 抽检 |
 | `examples/bpx/inspect_bpx_norm_stats.py` | 打印并检查全部 18 维归一化统计 |
 | `examples/bpx/smoke_test_bpx_checkpoint.py` | 真实 HDF5 checkpoint 离线推理与 23D 输出契约检查 |
+| `examples/bpx/evaluate_bpx_episode_server.py` | 通过已启动policy server回放HDF5，输出真实/预测动作指标、CSV、NPZ和可视化 |
+
+### 14.1 回放 episode 并比较真实动作
+
+policy server保持运行，在服务器另一个终端直接读取清洗HDF5；不需要再次转成LeRobot：
+
+```bash
+uv run examples/bpx/evaluate_bpx_episode_server.py \
+  --episode-path datasets/cleaned_bpx/episode_0.hdf5 \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --stride 30 \
+  --samples-per-frame 1 \
+  --output-dir eval_outputs/full_60000_episode0
+```
+
+快速检查通过后，用与实机一致的5步重规划间隔做更密集评估：
+
+```bash
+uv run examples/bpx/evaluate_bpx_episode_server.py \
+  --episode-path datasets/cleaned_bpx/episode_0.hdf5 \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --stride 5 \
+  --samples-per-frame 3 \
+  --output-dir eval_outputs/full_60000_episode0_stride5
+```
+
+输出包括 `metrics.json`、逐关节/逐horizon CSV、原始 `predictions.npz`、三相机抽帧、18维轨迹、单个30步动作块对齐图和总览图。同一路径已存在时脚本默认拒绝覆盖；明确需要重跑时添加 `--overwrite`。
+
+`episode_0` 已参与训练，因此该结果只能验证数据链、颜色、关节顺序和训练集拟合，不能作为泛化结论。正式比较full与LoRA时应对二者使用完全相同的episode、stride和samples，并分别指定输出目录；实机泛化必须使用从未参与训练的新episode和独立场景成功率。
 
 ## 15. 长训练前验收清单
 
