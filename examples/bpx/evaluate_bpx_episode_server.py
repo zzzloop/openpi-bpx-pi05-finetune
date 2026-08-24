@@ -98,12 +98,17 @@ def compute_metrics(
 def _write_csvs(output_dir: pathlib.Path, metrics: dict[str, Any]) -> None:
     with (output_dir / "per_joint_metrics.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["joint_index", "joint_name", "mae", "rmse", "normalized_mae", "first_step_correlation"])
+        writer.writerow(
+            ["joint_index", "joint_name", "unit", "mae", "rmse", "normalized_mae", "first_step_correlation"]
+        )
         for index, name in enumerate(bpx_constants.BPX_EFFECTIVE_JOINT_NAMES):
             writer.writerow(
                 [
                     index,
                     name,
+                    "linear_gripper_coordinate"
+                    if index in bpx_constants.BPX_EFFECTIVE_GRIPPER_INDICES
+                    else "rad",
                     metrics["per_joint_mae"][index],
                     metrics["per_joint_rmse"][index],
                     metrics["per_joint_normalized_mae"][index],
@@ -124,7 +129,7 @@ def _plot_summary(output_dir: pathlib.Path, metrics: dict[str, Any], inference_m
     figure, axes = plt.subplots(1, 3, figsize=(19, 6), constrained_layout=True)
     horizons = np.arange(len(metrics["per_horizon_mae"]))
     axes[0].plot(horizons, metrics["per_horizon_mae"], marker="o", label="raw MAE")
-    axes[0].set(title="MAE by action-horizon index", xlabel="horizon index", ylabel="absolute joint error")
+    axes[0].set(title="MAE by action-horizon index", xlabel="horizon index", ylabel="absolute error (mixed units)")
     axes[0].grid(alpha=0.25)
 
     joint_indices = np.arange(len(names))
@@ -308,6 +313,10 @@ def main(
             "query_count": len(query_indices),
             "stride": stride,
             "samples_per_frame": samples_per_frame,
+            "aggregate_mae_note": (
+                "Raw aggregate MAE mixes radians with the two linear gripper coordinates. "
+                "Use per_joint_normalized_mae for cross-joint and cross-checkpoint comparison."
+            ),
             "mean_round_trip_ms": float(inference_ms.mean()),
             "mean_server_inference_ms": (
                 None if np.isnan(server_inference_ms).all() else float(np.nanmean(server_inference_ms))

@@ -857,6 +857,8 @@ uv run examples/bpx/evaluate_bpx_episode_server.py \
 
 输出包括 `metrics.json`、逐关节/逐horizon CSV、原始 `predictions.npz`、三相机抽帧、18维轨迹、单个30步动作块对齐图和总览图。同一路径已存在时脚本默认拒绝覆盖；明确需要重跑时添加 `--overwrite`。
 
+机械臂和头部动作使用弧度，两个夹爪使用线性坐标，因此 `aggregate_mae` 混合了不同单位，只适合做同一数据链的粗略检查。Full/LoRA 横向比较应主要查看 `per_joint_metrics.csv` 的 `normalized_mae`、首步相关性、远期 horizon 误差和动作曲线，不应仅凭总 MAE 选模型。
+
 `episode_0` 已参与训练，因此该结果只能验证数据链、颜色、关节顺序和训练集拟合，不能作为泛化结论。正式比较full与LoRA时应对二者使用完全相同的episode、stride和samples，并分别指定输出目录；实机泛化必须使用从未参与训练的新episode和独立场景成功率。
 
 ## 15. 长训练前验收清单
