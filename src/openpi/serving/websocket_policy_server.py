@@ -55,14 +55,30 @@ class WebsocketPolicyServer:
         while True:
             try:
                 start_time = time.monotonic()
-                obs = msgpack_numpy.unpackb(await websocket.recv())
+                raw_obs = await websocket.recv()
+                request_received_time = time.monotonic()
+                request_received_unix_ns = time.time_ns()
+
+                unpack_time = time.monotonic()
+                obs = msgpack_numpy.unpackb(raw_obs)
+                unpack_time = time.monotonic() - unpack_time
 
                 infer_time = time.monotonic()
                 action = self._policy.infer(obs)
                 infer_time = time.monotonic() - infer_time
 
+                response_ready_time = time.monotonic()
                 action["server_timing"] = {
                     "infer_ms": infer_time * 1000,
+                    "request_unpack_ms": unpack_time * 1000,
+                    # Time from receiving the complete WebSocket frame through
+                    # observation decoding and policy inference. Response
+                    # MessagePack serialization and socket delivery happen
+                    # after this timestamp and are measured by the client-side
+                    # residual rather than being misreported as model time.
+                    "pre_response_ms": (response_ready_time - request_received_time) * 1000,
+                    "request_received_unix_ns": request_received_unix_ns,
+                    "response_ready_unix_ns": time.time_ns(),
                 }
                 if prev_total_time is not None:
                     # We can only record the last total time since we also want to include the send time.
