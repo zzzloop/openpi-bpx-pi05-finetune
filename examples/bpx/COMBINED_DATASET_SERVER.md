@@ -1,0 +1,169 @@
+# BPX 新旧数据统一转换与训练（服务器）
+
+所有命令都从仓库根目录执行。流程不会修改 `/scratch/bpx_datasets/new_datasets_cleaned`，也不会删除旧 59 条数据。
+
+## 1. 环境变量
+
+```bash
+cd ~/zzk_data/openpi-bpx-pi05-finetune
+uv sync
+
+export REPO_ROOT="$PWD"
+export NEW_ROOT=/scratch/bpx_datasets/new_datasets_cleaned
+export COMBINED_ROOT=/scratch/bpx_datasets/bpx_pi05_combined_source
+export HF_LEROBOT_HOME=/scratch/bpx_datasets/lerobot
+export MANIFEST="$COMBINED_ROOT/manifests/combined_episodes.json"
+```
+
+## 2. 严格检查新复制的约 200GB 数据
+
+先做快速结构门禁（读取全部 324 个 bag 的索引）：
+
+```bash
+uv run --with rosbags==0.11.0 examples/bpx/prepare_bpx_combined_source.py \
+  --new-bag-root "$NEW_ROOT"
+```
+
+必须看到：
+
+```text
+NEW DATASET PASS: bags=324, frames=107586, ... deep=False
+```
+
+再做完整内容门禁。该命令会顺序解压全部约 200GB 数据，耗时较长，但不会写入或修改数据：
+
+```bash
+uv run --with rosbags==0.11.0 examples/bpx/prepare_bpx_combined_source.py \
+  --new-bag-root "$NEW_ROOT" \
+  --deep
+```
+
+必须看到 `deep=True` 的同一 PASS。脚本同时检查：任务目录和编号、原始/暗/亮三份、审计记录中的文件大小与随机增益、8 个 ROS topic、30Hz 对齐所需的逐帧同时间戳、25D 有限数值、轮子为零、图像 360×640、RGB/BGR 编码和完整载荷。任何异常都会以非零状态退出。
+
+## 3. 把旧 59 条安全复制到 scratch
+
+只复制，不移动源数据；第二条 `rsync` 是 checksum dry-run，正确结果不应列出待复制文件：
+
+```bash
+mkdir -p "$COMBINED_ROOT/legacy_hdf5" "$COMBINED_ROOT/manifests"
+
+rsync -aH --info=progress2 --partial \
+  "$REPO_ROOT/datasets/cleaned_bpx/" \
+  "$COMBINED_ROOT/legacy_hdf5/"
+
+rsync -aHnc --checksum --itemize-changes \
+  "$REPO_ROOT/datasets/cleaned_bpx/" \
+  "$COMBINED_ROOT/legacy_hdf5/"
+```
+
+新数据不再复制一份；在统一源目录内建立只读入口，并核对链接目标：
+
+```bash
+if [[ ! -e "$COMBINED_ROOT/new_rosbags" ]]; then
+  ln -s "$NEW_ROOT" "$COMBINED_ROOT/new_rosbags"
+fi
+
+test "$(readlink -f "$COMBINED_ROOT/new_rosbags")" = "$(readlink -f "$NEW_ROOT")"
+export UNIFIED_NEW_ROOT="$COMBINED_ROOT/new_rosbags"
+```
+
+生成统一且确定的清单：
+
+```bash
+uv run --with rosbags==0.11.0 examples/bpx/prepare_bpx_combined_source.py \
+  --new-bag-root "$UNIFIED_NEW_ROOT" \
+  --legacy-hdf5-root "$COMBINED_ROOT/legacy_hdf5" \
+  --output-manifest "$MANIFEST" \
+  --deep
+```
+
+必须看到：
+
+```text
+COMBINED DATASET PASS: episodes=383, frames=175041
+```
+
+编号固定为：旧数据 `0..58`，新数据 `59..382`；每个新任务按源编号升序，再按 `original, dark, bright` 排列。`暗光混合方块` 使用与旧 59 条完全相同的提示词。
+
+## 4. 两条 pilot 转换和验收
+
+先转换旧数据第 0 条和新数据第 59 条：
+
+```bash
+uv run --with rosbags==0.11.0 examples/bpx/convert_bpx_combined_to_lerobot.py \
+  --manifest-path "$MANIFEST" \
+  --repo-id bpx/bpx_blocks_combined_pilot \
+  --source-episodes 0 59 \
+  --overwrite
+
+uv run --with rosbags==0.11.0 examples/bpx/validate_bpx_combined_lerobot.py \
+  --manifest-path "$MANIFEST" \
+  --repo-id bpx/bpx_blocks_combined_pilot \
+  --source-episodes 0 59
+```
+
+只有出现 `VALIDATION PASS` 才继续。
+
+## 5. 全量转换和逐帧验收
+
+```bash
+uv run --with rosbags==0.11.0 examples/bpx/convert_bpx_combined_to_lerobot.py \
+  --manifest-path "$MANIFEST" \
+  --repo-id bpx/bpx_blocks_combined
+
+uv run --with rosbags==0.11.0 examples/bpx/validate_bpx_combined_lerobot.py \
+  --manifest-path "$MANIFEST" \
+  --repo-id bpx/bpx_blocks_combined
+```
+
+目标目录是 `$HF_LEROBOT_HOME/bpx/bpx_blocks_combined`。验收会比较全部 175,041 帧的 18D state/action，并抽检每条轨迹首/中/末三相机 RGB。若目标目录已由失败的转换留下，先人工确认该目录确实是失败产物，再重新运行转换并显式加 `--overwrite`；不要对旧 `bpx/bpx_blocks` 使用该参数。
+
+## 6. 重新计算并检查归一化统计
+
+旧统计不能复用：
+
+```bash
+uv run scripts/compute_norm_stats.py \
+  --config-name pi05_bpx_full_low_mem_combined
+
+uv run examples/bpx/inspect_bpx_norm_stats.py \
+  --norm-stats-path assets/pi05_bpx_full_combined/bpx/bpx_blocks_combined/norm_stats.json
+```
+
+确认 18 个 state 和 18 个 action 维度全部有限，且没有未经解释的 `LOW_STD` / `LOW_QRANGE`。
+
+## 7. 全参数训练
+
+下面仅把配置和实验名切换到新数据集；用户已经验证可训练的显存、batch、FSDP、保存参数完全不变：
+
+```bash
+export CUDA_VISIBLE_DEVICES=2,3
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.96 \
+uv run scripts/train.py pi05_bpx_full_low_mem_combined \
+  --exp-name=bpx_full_low_mem_combined_bs2 \
+  --batch-size=2 \
+  --num-train-steps=100000 \
+  --fsdp-devices=2 \
+  --save-interval=5000 \
+  --keep-period=25000 \
+  --overwrite
+```
+
+中断后续训，所有参数和实验名必须一致，只把 `--overwrite` 换成 `--resume`：
+
+```bash
+export CUDA_VISIBLE_DEVICES=2,3
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.96 \
+uv run scripts/train.py pi05_bpx_full_low_mem_combined \
+  --exp-name=bpx_full_low_mem_combined_bs2 \
+  --batch-size=2 \
+  --num-train-steps=100000 \
+  --fsdp-devices=2 \
+  --save-interval=5000 \
+  --keep-period=25000 \
+  --resume
+```
+
+`--num-train-steps` 是最终总步数，不是本次额外训练步数；需要延长时只提高该值，其他参数保持不变。

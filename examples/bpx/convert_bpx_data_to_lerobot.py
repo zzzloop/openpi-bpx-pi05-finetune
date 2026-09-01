@@ -27,7 +27,7 @@ from openpi.policies import bpx_constants
 _REPO_ID_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
-def _output_path(repo_id: str) -> pathlib.Path:
+def resolve_output_path(repo_id: str) -> pathlib.Path:
     """Resolve a safe local LeRobot path for an ``organization/dataset`` ID."""
     parts = repo_id.split("/")
     if len(parts) != 2 or any(_REPO_ID_PART.fullmatch(part) is None for part in parts):
@@ -42,7 +42,7 @@ def _output_path(repo_id: str) -> pathlib.Path:
     return output_path
 
 
-def _features() -> dict:
+def bpx_features() -> dict:
     image_feature = {
         "dtype": "image",
         "shape": bpx_constants.BPX_SOURCE_IMAGE_SHAPE,
@@ -93,11 +93,11 @@ def main(
         names = ", ".join(path.name for path in explicit_failures)
         raise ValueError(f"Refusing explicitly unsuccessful episode(s): {names}.")
 
-    output_path = _output_path(repo_id)
+    output_path = resolve_output_path(repo_id)
     if output_path.exists():
         if not overwrite:
             raise FileExistsError(
-                f"Output dataset already exists at {output_path}. " "Choose another repo_id or pass --overwrite."
+                f"Output dataset already exists at {output_path}. Choose another repo_id or pass --overwrite."
             )
         shutil.rmtree(output_path)
 
@@ -105,7 +105,7 @@ def main(
         repo_id=repo_id,
         robot_type="bpx20260310",
         fps=fps,
-        features=_features(),
+        features=bpx_features(),
         use_videos=True,
         image_writer_threads=8,
         image_writer_processes=0,

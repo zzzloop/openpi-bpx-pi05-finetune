@@ -46,7 +46,12 @@ def main(
     frame_index: int = 0,
 ) -> None:
     """Run a real HDF5 observation through a full or LoRA checkpoint."""
-    valid_configs = {"pi05_bpx_full", "pi05_bpx_full_low_mem", "pi05_bpx_lora"}
+    valid_configs = {
+        "pi05_bpx_full",
+        "pi05_bpx_full_low_mem",
+        "pi05_bpx_full_low_mem_combined",
+        "pi05_bpx_lora",
+    }
     if config_name not in valid_configs:
         raise ValueError(f"config_name must be one of {sorted(valid_configs)}.")
     observation, resolved_index = bpx_data.read_policy_observation(episode_path, frame_index)

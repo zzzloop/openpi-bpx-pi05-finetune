@@ -16,6 +16,7 @@ from openpi.training import optimizer
     [
         ("pi05_bpx_full", 64, 20_000, 2.5e-5, 0.999),
         ("pi05_bpx_full_low_mem", 2, 20_000, 2.5e-5, None),
+        ("pi05_bpx_full_low_mem_combined", 2, 20_000, 2.5e-5, None),
         ("pi05_bpx_lora", 128, 30_000, 5e-5, None),
     ],
 )
@@ -28,9 +29,10 @@ def test_bpx_train_configs_load_with_expected_contract(
     ema_decay: float | None,
 ):
     train_config = config_module.get_config(config_name)
+    repo_id = train_config.data.repo_id
     data_factory = dataclasses.replace(
         train_config.data,
-        assets=config_module.AssetsConfig(assets_dir=str(tmp_path), asset_id="bpx/bpx_blocks"),
+        assets=config_module.AssetsConfig(assets_dir=str(tmp_path), asset_id=repo_id),
     )
     data_config = data_factory.create(tmp_path, train_config.model)
 
@@ -47,8 +49,8 @@ def test_bpx_train_configs_load_with_expected_contract(
     assert train_config.monitoring_action_names == bpx_constants.BPX_EFFECTIVE_JOINT_NAMES
     assert isinstance(train_config.lr_schedule, optimizer.CosineDecaySchedule)
     assert train_config.lr_schedule.peak_lr == peak_lr
-    assert data_config.repo_id == "bpx/bpx_blocks"
-    assert data_config.asset_id == "bpx/bpx_blocks"
+    assert data_config.repo_id == repo_id
+    assert data_config.asset_id == repo_id
     assert data_config.prompt_from_task
     assert data_config.use_quantile_norm
     assert data_config.action_sequence_keys == ("action",)
@@ -76,6 +78,20 @@ def test_bpx_low_memory_full_config_only_drops_ema_and_reduces_default_batch():
     assert low_memory_config.weight_loader == full_config.weight_loader
     assert low_memory_config.ema_decay is None
     assert low_memory_config.batch_size == 2
+
+
+def test_bpx_combined_config_only_changes_dataset_identity():
+    original = config_module.get_config("pi05_bpx_full_low_mem")
+    combined = config_module.get_config("pi05_bpx_full_low_mem_combined")
+
+    assert combined.model == original.model
+    assert combined.lr_schedule == original.lr_schedule
+    assert combined.optimizer == original.optimizer
+    assert combined.weight_loader == original.weight_loader
+    assert combined.batch_size == original.batch_size == 2
+    assert combined.ema_decay is original.ema_decay is None
+    assert combined.data.repo_id == "bpx/bpx_blocks_combined"
+    assert combined.data.assets.asset_id == "bpx/bpx_blocks_combined"
 
 
 def test_bpx_data_transform_order_round_trips_absolute_actions(tmp_path: pathlib.Path):

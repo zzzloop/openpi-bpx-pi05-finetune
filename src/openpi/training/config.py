@@ -905,6 +905,42 @@ _CONFIGS = [
         },
     ),
     TrainConfig(
+        name="pi05_bpx_full_low_mem_combined",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30),
+        data=LeRobotBpxDataConfig(
+            repo_id="bpx/bpx_blocks_combined",
+            assets=AssetsConfig(
+                assets_dir="./assets/pi05_bpx_full_combined",
+                asset_id="bpx/bpx_blocks_combined",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        batch_size=2,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("./checkpoints/pretrained/pi05_base/params"),
+        num_train_steps=20_000,
+        save_interval=1_000,
+        keep_period=5_000,
+        monitoring_enabled=True,
+        monitoring_plot_interval=500,
+        monitoring_visualization_interval=1_000,
+        monitoring_max_samples=2,
+        monitoring_action_names=bpx_constants.BPX_EFFECTIVE_JOINT_NAMES,
+        policy_metadata={
+            "fps": bpx_constants.BPX_FPS,
+            "action_horizon": 30,
+            "raw_action_dim": bpx_constants.BPX_RAW_DIM,
+            "effective_action_dim": bpx_constants.BPX_EFFECTIVE_DIM,
+        },
+    ),
+    TrainConfig(
         name="pi05_bpx_lora",
         model=pi0_config.Pi0Config(
             pi05=True,
