@@ -117,13 +117,14 @@ uv run --with rosbags==0.11.0 examples/bpx/validate_bpx_combined_lerobot.py \
 
 ```bash
 uv run scripts/compute_norm_stats.py \
-  --config-name pi05_bpx_full_low_mem_combined
+  --config-name pi05_bpx_full_low_mem_combined \
+  --num-workers 8
 
 uv run examples/bpx/inspect_bpx_norm_stats.py \
   --norm-stats-path assets/pi05_bpx_full_combined/bpx/bpx_blocks_combined/norm_stats.json
 ```
 
-确认 18 个 state 和 18 个 action 维度全部有限，且没有未经解释的 `LOW_STD` / `LOW_QRANGE`。
+`--num-workers 8` 只并行化数据读取，仍使用配置中的 `batch_size=2`、全部帧、相同变换和相同统计算法；不使用 `--max-frames`。确认 18 个 state 和 18 个 action 维度全部有限，且没有未经解释的 `LOW_STD` / `LOW_QRANGE`。
 
 ## 7. 全参数训练
 
@@ -135,6 +136,7 @@ export CUDA_VISIBLE_DEVICES=2,3
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.96 \
 uv run scripts/train.py pi05_bpx_full_low_mem_combined \
   --exp-name=bpx_full_low_mem_combined_bs2 \
+  --checkpoint-base-dir=/scratch/bpx_datasets/checkpoints \
   --batch-size=2 \
   --num-train-steps=100000 \
   --fsdp-devices=2 \
@@ -151,6 +153,7 @@ export CUDA_VISIBLE_DEVICES=2,3
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.96 \
 uv run scripts/train.py pi05_bpx_full_low_mem_combined \
   --exp-name=bpx_full_low_mem_combined_bs2 \
+  --checkpoint-base-dir=/scratch/bpx_datasets/checkpoints \
   --batch-size=2 \
   --num-train-steps=100000 \
   --fsdp-devices=2 \

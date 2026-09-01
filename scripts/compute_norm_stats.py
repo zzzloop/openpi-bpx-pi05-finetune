@@ -86,8 +86,26 @@ def create_rlds_dataloader(
     return data_loader, num_batches
 
 
-def main(config_name: str, max_frames: int | None = None):
+def main(
+    config_name: str,
+    max_frames: int | None = None,
+    *,
+    num_workers: int | None = None,
+):
+    """Compute normalization statistics for a training config.
+
+    Args:
+        config_name: Registered training configuration name.
+        max_frames: Optional upper bound on the number of sampled frames.
+        num_workers: Optional torch DataLoader worker override. Leaving this unset
+            preserves the worker count from the training configuration. Increasing
+            it only parallelizes input loading; it does not change the selected
+            frames, batch size, transforms, or statistics algorithm.
+    """
     config = _config.get_config(config_name)
+    effective_num_workers = config.num_workers if num_workers is None else num_workers
+    if effective_num_workers < 0:
+        raise ValueError("num_workers must be non-negative")
     data_config = config.data.create(config.assets_dirs, config.model)
 
     if data_config.rlds_data_dir is not None:
@@ -96,7 +114,12 @@ def main(config_name: str, max_frames: int | None = None):
         )
     else:
         data_loader, num_batches = create_torch_dataloader(
-            data_config, config.model.action_horizon, config.batch_size, config.model, config.num_workers, max_frames
+            data_config,
+            config.model.action_horizon,
+            config.batch_size,
+            config.model,
+            effective_num_workers,
+            max_frames,
         )
 
     keys = ["state", "actions"]
