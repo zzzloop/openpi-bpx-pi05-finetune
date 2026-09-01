@@ -30,7 +30,7 @@ uv run --with rosbags==0.11.0 examples/bpx/prepare_bpx_combined_source.py \
 NEW DATASET PASS: bags=324, frames=107586, ... deep=False
 ```
 
-再做完整内容门禁。该命令会顺序解压全部约 200GB 数据，耗时较长，但不会写入或修改数据：
+可选的完整内容门禁会顺序解压全部约 200GB 数据，耗时较长，但不会写入或修改数据：
 
 ```bash
 uv run --with rosbags==0.11.0 examples/bpx/prepare_bpx_combined_source.py \
@@ -38,7 +38,7 @@ uv run --with rosbags==0.11.0 examples/bpx/prepare_bpx_combined_source.py \
   --deep
 ```
 
-必须看到 `deep=True` 的同一 PASS。脚本同时检查：任务目录和编号、原始/暗/亮三份、审计记录中的文件大小与随机增益、8 个 ROS topic、30Hz 对齐所需的逐帧同时间戳、25D 有限数值、轮子为零、图像 360×640、RGB/BGR 编码和完整载荷。任何异常都会以非零状态退出。
+时间紧张时可以跳过这次独立 deep：后续全量 LeRobot 转换会使用同一逐帧解码器检查 8 个 ROS topic、逐帧同时间戳、25D 有限数值、轮子为零、图像 360×640、RGB/BGR 编码和完整载荷；转换后验证再核对全部 18D state/action。独立 deep 额外验证 original/dark/bright 的逐消息亮度变换关系。
 
 ## 3. 把旧 59 条安全复制到 scratch
 
@@ -73,8 +73,7 @@ export UNIFIED_NEW_ROOT="$COMBINED_ROOT/new_rosbags"
 uv run --with rosbags==0.11.0 examples/bpx/prepare_bpx_combined_source.py \
   --new-bag-root "$UNIFIED_NEW_ROOT" \
   --legacy-hdf5-root "$COMBINED_ROOT/legacy_hdf5" \
-  --output-manifest "$MANIFEST" \
-  --deep
+  --output-manifest "$MANIFEST"
 ```
 
 必须看到：

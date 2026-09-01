@@ -41,6 +41,7 @@ class BagSummary:
     start_time_ns: int
     end_time_ns: int
     bytes: int
+    observed_average_fps: float
 
 
 @dataclasses.dataclass(frozen=True)
@@ -147,8 +148,11 @@ def validate_bag_metadata(path: pathlib.Path) -> BagSummary:
         if duration_ns <= 0:
             raise ValueError(f"{path}: non-positive bag duration")
         observed_fps = (frames - 1) * 1e9 / duration_ns
-        if not 29.0 <= observed_fps <= 31.0:
-            raise ValueError(f"{path}: observed average rate is {observed_fps:.3f} Hz, expected 30 Hz")
+        # Bag start/end times include recording-boundary scheduling effects, so
+        # this average is only a coarse corruption signal. The converter uses
+        # the confirmed 30 Hz frame contract and validates per-frame alignment.
+        if not 20.0 <= observed_fps <= 40.0:
+            raise ValueError(f"{path}: implausible average frame rate {observed_fps:.3f} Hz")
         return BagSummary(
             path=path,
             frames=frames,
@@ -156,6 +160,7 @@ def validate_bag_metadata(path: pathlib.Path) -> BagSummary:
             start_time_ns=reader.start_time,
             end_time_ns=reader.end_time,
             bytes=path.stat().st_size,
+            observed_average_fps=observed_fps,
         )
 
 

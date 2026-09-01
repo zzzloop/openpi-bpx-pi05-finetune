@@ -130,8 +130,15 @@ def audit_new_bags(root: pathlib.Path, *, deep: bool) -> list[dict]:
                         "frames": summary.frames,
                         "messages": summary.messages,
                         "bytes": summary.bytes,
+                        "observed_average_fps": summary.observed_average_fps,
                     }
                 )
+                if not 29.0 <= summary.observed_average_fps <= 31.0:
+                    print(
+                        f"RATE WARNING: {path} average={summary.observed_average_fps:.3f} Hz; "
+                        "recorded for review but not treated as corruption",
+                        flush=True,
+                    )
                 print(f"NEW OK {len(records):03d}/{EXPECTED_NEW_BAGS}: {path} ({summary.frames} frames)", flush=True)
             if deep:
                 source_path = _variant_path(root, spec, source_index, "original")
