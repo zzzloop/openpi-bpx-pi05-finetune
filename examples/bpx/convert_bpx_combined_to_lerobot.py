@@ -75,6 +75,43 @@ def _rosbag_frames(record: dict):
         raise ValueError(f"{path}: decoded {count} frames, manifest says {record['frames']}")
 
 
+def _create_or_resume_dataset(
+    repo_id: str, records: list[dict], output_path: pathlib.Path
+) -> tuple[LeRobotDataset, list[dict]]:
+    legacy_prefix = []
+    for record in records:
+        if record["source_kind"] != "lerobot":
+            break
+        legacy_prefix.append(record)
+    if legacy_prefix:
+        if len(legacy_prefix) != 59 or [record["source_index"] for record in legacy_prefix] != list(range(59)):
+            raise ValueError("The legacy LeRobot prefix must contain episodes 0..58")
+        source_roots = {pathlib.Path(record["path"]).resolve() for record in legacy_prefix}
+        if len(source_roots) != 1:
+            raise ValueError("Legacy LeRobot records must reference one dataset root")
+        legacy_root = source_roots.pop()
+        print(f"Copying validated legacy LeRobot dataset without re-encoding: {legacy_root} -> {output_path}")
+        shutil.copytree(legacy_root, output_path)
+        dataset = LeRobotDataset(repo_id, root=output_path)
+        if dataset.num_episodes != 59 or dataset.num_frames != 67_455:
+            raise ValueError("Copied legacy LeRobot dataset does not have the expected 59/67,455 contract")
+        remaining = records[len(legacy_prefix) :]
+    else:
+        dataset = LeRobotDataset.create(
+            repo_id=repo_id,
+            robot_type="bpx20260310",
+            fps=bpx_constants.BPX_FPS,
+            features=legacy_converter.bpx_features(),
+            use_videos=True,
+            image_writer_threads=8,
+            image_writer_processes=0,
+        )
+        remaining = records
+    if dataset.image_writer is None:
+        dataset.start_image_writer(num_processes=0, num_threads=8)
+    return dataset, remaining
+
+
 def main(
     manifest_path: pathlib.Path,
     repo_id: str = "bpx/bpx_blocks_combined",
@@ -96,17 +133,11 @@ def main(
             raise FileExistsError(f"Output exists: {output_path}; pass --overwrite only after checking the target")
         shutil.rmtree(output_path)
 
-    dataset = LeRobotDataset.create(
-        repo_id=repo_id,
-        robot_type="bpx20260310",
-        fps=bpx_constants.BPX_FPS,
-        features=legacy_converter.bpx_features(),
-        use_videos=True,
-        image_writer_threads=8,
-        image_writer_processes=0,
-    )
-    total_frames = 0
-    for output_episode, record in enumerate(records):
+    if any(record["source_kind"] == "lerobot" for record in records[59:]):
+        raise ValueError("Legacy LeRobot records are only allowed as the first 59 manifest entries")
+    dataset, records_to_convert = _create_or_resume_dataset(repo_id, records, output_path)
+    total_frames = dataset.num_frames
+    for record in records_to_convert:
         if record["source_kind"] == "hdf5":
             frames = _hdf5_frames(record)
         elif record["source_kind"] == "rosbag":
@@ -122,11 +153,14 @@ def main(
         dataset.save_episode()
         total_frames += frame_count
         print(
-            f"Saved output={output_episode} source={record['episode_index']} kind={record['source_kind']} "
+            f"Saved output={dataset.num_episodes - 1} source={record['episode_index']} kind={record['source_kind']} "
             f"frames={frame_count} task={record['task']!r}",
             flush=True,
         )
-    print(f"CONVERSION PASS: episodes={len(records)}, frames={total_frames}, output={output_path}")
+    dataset.stop_image_writer()
+    if dataset.num_episodes != len(records) or total_frames != sum(record["frames"] for record in records):
+        raise ValueError("Converted dataset totals do not match the selected manifest records")
+    print(f"CONVERSION PASS: episodes={dataset.num_episodes}, frames={total_frames}, output={output_path}")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import tempfile
 
 import bpx_data
 import bpx_rosbag_data
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 import tyro
 
 
@@ -188,6 +189,41 @@ def audit_legacy_hdf5(root: pathlib.Path) -> list[dict]:
     return records
 
 
+def audit_legacy_lerobot(root: pathlib.Path) -> list[dict]:
+    root = root.resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"Legacy LeRobot dataset not found: {root}")
+    dataset = LeRobotDataset("bpx/bpx_blocks", root=root)
+    if dataset.num_episodes != EXPECTED_LEGACY_EPISODES or dataset.num_frames != EXPECTED_LEGACY_FRAMES:
+        raise ValueError(
+            f"Legacy LeRobot dataset has episodes={dataset.num_episodes}, frames={dataset.num_frames}; "
+            f"expected {EXPECTED_LEGACY_EPISODES}/{EXPECTED_LEGACY_FRAMES}"
+        )
+    for key in ("observation.state", "action"):
+        if tuple(dataset.features[key]["shape"]) != (18,):
+            raise ValueError(f"Legacy LeRobot feature {key} is not 18-D")
+    records = []
+    for episode_index in range(EXPECTED_LEGACY_EPISODES):
+        episode = dataset.meta.episodes[episode_index]
+        tasks = episode.get("tasks", [])
+        if tasks != ["Place all the colored blocks on the table into the bucket."]:
+            raise ValueError(f"Legacy LeRobot episode {episode_index} has unexpected tasks: {tasks}")
+        records.append(
+            {
+                "source_kind": "lerobot",
+                "source_task": "legacy_blocks",
+                "source_index": episode_index,
+                "variant": "legacy",
+                "task": tasks[0],
+                "path": str(root),
+                "frames": int(episode["length"]),
+            }
+        )
+    if sum(record["frames"] for record in records) != EXPECTED_LEGACY_FRAMES:
+        raise ValueError("Legacy LeRobot per-episode lengths do not sum to 67,455")
+    return records
+
+
 def _write_json_atomic(path: pathlib.Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
@@ -201,6 +237,7 @@ def main(
     new_bag_root: pathlib.Path,
     *,
     legacy_hdf5_root: pathlib.Path | None = None,
+    legacy_lerobot_root: pathlib.Path | None = None,
     output_manifest: pathlib.Path | None = None,
     deep: bool = False,
 ) -> None:
@@ -211,12 +248,18 @@ def main(
         f"bytes={sum(item['bytes'] for item in new_records)} deep={deep}",
         flush=True,
     )
-    if legacy_hdf5_root is None:
+    if legacy_hdf5_root is not None and legacy_lerobot_root is not None:
+        raise ValueError("Choose only one legacy source: HDF5 or LeRobot")
+    if legacy_hdf5_root is None and legacy_lerobot_root is None:
         if output_manifest is not None:
-            raise ValueError("--output-manifest requires --legacy-hdf5-root")
+            raise ValueError("--output-manifest requires one legacy source")
         return
 
-    legacy_records = audit_legacy_hdf5(legacy_hdf5_root)
+    legacy_records = (
+        audit_legacy_hdf5(legacy_hdf5_root)
+        if legacy_hdf5_root is not None
+        else audit_legacy_lerobot(legacy_lerobot_root)
+    )
     records = legacy_records + new_records
     for episode_index, record in enumerate(records):
         record["episode_index"] = episode_index

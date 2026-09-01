@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import json
 import pathlib
 
@@ -19,6 +20,11 @@ from validate_bpx_lerobot import _to_rgb_uint8
 from validate_bpx_lerobot import _validate_metadata
 
 from openpi.policies import bpx_constants
+
+
+@lru_cache(maxsize=2)
+def _load_legacy_lerobot(root: str) -> LeRobotDataset:
+    return LeRobotDataset("bpx/bpx_blocks", root=pathlib.Path(root))
 
 
 def _source_arrays(record: dict) -> tuple[np.ndarray, np.ndarray, dict[int, dict[str, np.ndarray]]]:
@@ -49,6 +55,23 @@ def _source_arrays(record: dict) -> tuple[np.ndarray, np.ndarray, dict[int, dict
             if index in sample_indices:
                 samples[index] = frame.images
         return np.asarray(states, dtype=np.float32), np.asarray(actions, dtype=np.float32), samples
+    if record["source_kind"] == "lerobot":
+        dataset = _load_legacy_lerobot(record["path"])
+        episode_index = int(record["source_index"])
+        table = pq.read_table(
+            dataset.root / dataset.meta.get_data_file_path(episode_index),
+            columns=["observation.state", "action"],
+        )
+        states = _list_column(table, "observation.state", np.float32)
+        actions = _list_column(table, "action", np.float32)
+        episode_start = int(dataset.episode_data_index["from"][episode_index])
+        samples = {}
+        for frame_index in sample_indices:
+            item = dataset[episode_start + frame_index]
+            samples[frame_index] = {
+                camera: _to_rgb_uint8(item[f"observation.images.{camera}"]) for camera in bpx_constants.BPX_IMAGE_KEYS
+            }
+        return states, actions, samples
     raise ValueError(f"Unknown source kind: {record['source_kind']}")
 
 

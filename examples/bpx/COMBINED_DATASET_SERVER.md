@@ -13,6 +13,7 @@ export NEW_ROOT=/scratch/bpx_datasets/new_datasets_cleaned
 export COMBINED_ROOT=/scratch/bpx_datasets/bpx_pi05_combined_source
 export HF_LEROBOT_HOME=/scratch/bpx_datasets/lerobot
 export MANIFEST="$COMBINED_ROOT/manifests/combined_episodes.json"
+export LEGACY_LEROBOT_ROOT="$REPO_ROOT/datasets/lerobot/bpx/bpx_blocks"
 ```
 
 ## 2. 严格检查新复制的约 200GB 数据
@@ -40,20 +41,13 @@ uv run --with rosbags==0.11.0 examples/bpx/prepare_bpx_combined_source.py \
 
 时间紧张时可以跳过这次独立 deep：后续全量 LeRobot 转换会使用同一逐帧解码器检查 8 个 ROS topic、逐帧同时间戳、25D 有限数值、轮子为零、图像 360×640、RGB/BGR 编码和完整载荷；转换后验证再核对全部 18D state/action。独立 deep 额外验证 original/dark/bright 的逐消息亮度变换关系。
 
-## 3. 把旧 59 条安全复制到 scratch
+## 3. 以已验收的旧 LeRobot 59 条作为前缀
 
-只复制，不移动源数据；第二条 `rsync` 是 checksum dry-run，正确结果不应列出待复制文件：
+原始 HDF5 只保留了 episode 0 和 50，因此不能作为 59 条来源。先确认旧 LeRobot 数据集存在；全量转换器会把它完整复制到 scratch 的新目标，再追加新 324 条，不会二次编码旧视频：
 
 ```bash
-mkdir -p "$COMBINED_ROOT/legacy_hdf5" "$COMBINED_ROOT/manifests"
-
-rsync -aH --info=progress2 --partial \
-  "$REPO_ROOT/datasets/cleaned_bpx/" \
-  "$COMBINED_ROOT/legacy_hdf5/"
-
-rsync -aHnc --checksum --itemize-changes \
-  "$REPO_ROOT/datasets/cleaned_bpx/" \
-  "$COMBINED_ROOT/legacy_hdf5/"
+test -d "$LEGACY_LEROBOT_ROOT"
+mkdir -p "$COMBINED_ROOT/manifests"
 ```
 
 新数据不再复制一份；在统一源目录内建立只读入口，并核对链接目标：
@@ -72,7 +66,7 @@ export UNIFIED_NEW_ROOT="$COMBINED_ROOT/new_rosbags"
 ```bash
 uv run --with rosbags==0.11.0 examples/bpx/prepare_bpx_combined_source.py \
   --new-bag-root "$UNIFIED_NEW_ROOT" \
-  --legacy-hdf5-root "$COMBINED_ROOT/legacy_hdf5" \
+  --legacy-lerobot-root "$LEGACY_LEROBOT_ROOT" \
   --output-manifest "$MANIFEST"
 ```
 
@@ -84,21 +78,21 @@ COMBINED DATASET PASS: episodes=383, frames=175041
 
 编号固定为：旧数据 `0..58`，新数据 `59..382`；每个新任务按源编号升序，再按 `original, dark, bright` 排列。`暗光混合方块` 使用与旧 59 条完全相同的提示词。
 
-## 4. 两条 pilot 转换和验收
+## 4. 新数据 pilot 转换和验收
 
-先转换旧数据第 0 条和新数据第 59 条：
+旧59条已经验收过；pilot 只转换第一条新数据（统一清单 source episode 59）：
 
 ```bash
 uv run --with rosbags==0.11.0 examples/bpx/convert_bpx_combined_to_lerobot.py \
   --manifest-path "$MANIFEST" \
   --repo-id bpx/bpx_blocks_combined_pilot \
-  --source-episodes 0 59 \
+  --source-episodes 59 \
   --overwrite
 
 uv run --with rosbags==0.11.0 examples/bpx/validate_bpx_combined_lerobot.py \
   --manifest-path "$MANIFEST" \
   --repo-id bpx/bpx_blocks_combined_pilot \
-  --source-episodes 0 59
+  --source-episodes 59
 ```
 
 只有出现 `VALIDATION PASS` 才继续。
