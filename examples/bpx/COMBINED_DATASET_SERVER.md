@@ -121,7 +121,7 @@ uv run scripts/compute_norm_stats.py \
   --num-workers 8
 
 uv run examples/bpx/inspect_bpx_norm_stats.py \
-  --norm-stats-path assets/pi05_bpx_full_combined/bpx/bpx_blocks_combined/norm_stats.json
+  --norm-stats-path assets/pi05_bpx_full_low_mem_combined/bpx/bpx_blocks_combined/norm_stats.json
 ```
 
 `--num-workers 8` 只并行化数据读取，仍使用配置中的 `batch_size=2`、全部帧、相同变换和相同统计算法；不使用 `--max-frames`。确认 18 个 state 和 18 个 action 维度全部有限，且没有未经解释的 `LOW_STD` / `LOW_QRANGE`。

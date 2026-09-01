@@ -92,6 +92,7 @@ def test_bpx_combined_config_only_changes_dataset_identity():
     assert combined.ema_decay is original.ema_decay is None
     assert combined.data.repo_id == "bpx/bpx_blocks_combined"
     assert combined.data.assets.asset_id == "bpx/bpx_blocks_combined"
+    assert combined.data.assets.assets_dir is None
 
 
 def test_bpx_data_transform_order_round_trips_absolute_actions(tmp_path: pathlib.Path):

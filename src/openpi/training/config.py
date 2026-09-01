@@ -910,7 +910,6 @@ _CONFIGS = [
         data=LeRobotBpxDataConfig(
             repo_id="bpx/bpx_blocks_combined",
             assets=AssetsConfig(
-                assets_dir="./assets/pi05_bpx_full_combined",
                 asset_id="bpx/bpx_blocks_combined",
             ),
             base_config=DataConfig(prompt_from_task=True),
