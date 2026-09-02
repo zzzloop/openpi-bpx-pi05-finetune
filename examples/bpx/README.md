@@ -820,6 +820,9 @@ actions: (30, 23)
 | `src/openpi/training/monitoring_test.py` | 监控写入、无头绘图、续训截断和可视化测试 |
 | `examples/bpx/bpx_data.py` | HDF5 schema 与严格校验公共逻辑 |
 | `examples/bpx/clean_bpx_hdf5.py` | 不覆盖原始文件的 qpos 毛刺清洗与审计报告 |
+| `examples/bpx/BPX_SPIKE_CLEANING_GUIDE.md` | ROS bag/HDF5毛刺审计、清洗、复核与可追溯操作规范 |
+| `examples/bpx/evaluate_bpx_bag_server.py` | 通过已启动策略服务对ROS bag做逐关节、逐horizon离线评估和可视化 |
+| `examples/bpx/BAG_CHECKPOINT_EVALUATION.md` | combined checkpoint的ROS bag离线评估与真机服务命令 |
 | `examples/bpx/preflight_bpx_server.py` | 服务器软件、GPU/JAX、磁盘、base 与数据总门禁 |
 | `examples/bpx/validate_bpx_hdf5.py` | 转换前数据质量检查 |
 | `examples/bpx/preview_bpx_images.py` | RGB/BGR 四相机预览 |

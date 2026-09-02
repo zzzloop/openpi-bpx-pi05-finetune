@@ -7,8 +7,6 @@ import numpy as np
 import tyro
 
 from openpi.policies import bpx_constants
-from openpi.policies import policy_config
-from openpi.training import config as config_module
 
 
 def validate_output_contract(actions: np.ndarray, expected_shape: tuple[int, int]) -> None:
@@ -46,6 +44,9 @@ def main(
     frame_index: int = 0,
 ) -> None:
     """Run a real HDF5 observation through a full or LoRA checkpoint."""
+    from openpi.policies import policy_config  # noqa: PLC0415
+    from openpi.training import config as config_module  # noqa: PLC0415
+
     valid_configs = {
         "pi05_bpx_full",
         "pi05_bpx_full_low_mem",

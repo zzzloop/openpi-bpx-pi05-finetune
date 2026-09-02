@@ -1,7 +1,6 @@
+import evaluate_bpx_episode_server as evaluation
 import numpy as np
 import pytest
-
-import evaluate_bpx_episode_server as evaluation
 
 
 def test_select_query_indices_covers_episode_when_limited():
@@ -23,7 +22,7 @@ def test_compute_metrics_masks_short_final_horizon_and_normalizes():
     assert np.isfinite(metrics["aggregate_normalized_mae"])
 
 
-@pytest.mark.parametrize("frames,stride,max_queries", [(0, 1, None), (10, 0, None), (10, 1, 0)])
+@pytest.mark.parametrize(("frames", "stride", "max_queries"), [(0, 1, None), (10, 0, None), (10, 1, 0)])
 def test_select_query_indices_rejects_invalid_arguments(frames, stride, max_queries):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="positive"):
         evaluation.select_query_indices(frames, stride, max_queries)

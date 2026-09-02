@@ -8,18 +8,18 @@ import pathlib
 import time
 from typing import Any
 
+import bpx_data
 import h5py
-import matplotlib
+import matplotlib as mpl
 import numpy as np
+from openpi_client import websocket_client_policy
+import smoke_test_bpx_checkpoint
 import tyro
 
-import bpx_data
-import smoke_test_bpx_checkpoint
 from openpi.policies import bpx_constants
-from openpi_client import websocket_client_policy
 
-matplotlib.use("Agg")
-from matplotlib import pyplot as plt  # noqa: E402
+mpl.use("Agg")
+from matplotlib import pyplot as plt
 
 
 def select_query_indices(frames: int, stride: int, max_queries: int | None) -> np.ndarray:
@@ -95,7 +95,7 @@ def compute_metrics(
     }
 
 
-def _write_csvs(output_dir: pathlib.Path, metrics: dict[str, Any]) -> None:
+def write_csvs(output_dir: pathlib.Path, metrics: dict[str, Any]) -> None:
     with (output_dir / "per_joint_metrics.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(
@@ -106,9 +106,7 @@ def _write_csvs(output_dir: pathlib.Path, metrics: dict[str, Any]) -> None:
                 [
                     index,
                     name,
-                    "linear_gripper_coordinate"
-                    if index in bpx_constants.BPX_EFFECTIVE_GRIPPER_INDICES
-                    else "rad",
+                    "linear_gripper_coordinate" if index in bpx_constants.BPX_EFFECTIVE_GRIPPER_INDICES else "rad",
                     metrics["per_joint_mae"][index],
                     metrics["per_joint_rmse"][index],
                     metrics["per_joint_normalized_mae"][index],
@@ -124,7 +122,7 @@ def _write_csvs(output_dir: pathlib.Path, metrics: dict[str, Any]) -> None:
             writer.writerow([index, mae, normalized])
 
 
-def _plot_summary(output_dir: pathlib.Path, metrics: dict[str, Any], inference_ms: np.ndarray) -> None:
+def plot_summary(output_dir: pathlib.Path, metrics: dict[str, Any], inference_ms: np.ndarray) -> None:
     names = bpx_constants.BPX_EFFECTIVE_JOINT_NAMES
     figure, axes = plt.subplots(1, 3, figsize=(19, 6), constrained_layout=True)
     horizons = np.arange(len(metrics["per_horizon_mae"]))
@@ -153,7 +151,7 @@ def _plot_summary(output_dir: pathlib.Path, metrics: dict[str, Any], inference_m
     plt.close(figure)
 
 
-def _plot_joint_curves(
+def plot_joint_curves(
     output_dir: pathlib.Path,
     query_indices: np.ndarray,
     prediction_mean: np.ndarray,
@@ -178,7 +176,41 @@ def _plot_joint_curves(
     plt.close(figure)
 
 
-def _plot_chunk_overlay(
+def plot_state_action_curves(
+    output_dir: pathlib.Path,
+    full_episode_states: np.ndarray,
+    full_episode_actions: np.ndarray,
+) -> None:
+    if full_episode_states.shape != full_episode_actions.shape:
+        raise ValueError("full_episode_states and full_episode_actions must have matching shapes")
+    figure, axes = plt.subplots(6, 3, figsize=(19, 20), sharex=True, constrained_layout=True)
+    frame_axis = np.arange(full_episode_actions.shape[0])
+    for joint_index, axis in enumerate(axes.flat):
+        axis.plot(
+            frame_axis,
+            full_episode_states[:, joint_index],
+            color="tab:green",
+            linewidth=1.0,
+            label="measured qpos",
+        )
+        axis.plot(
+            frame_axis,
+            full_episode_actions[:, joint_index],
+            color="0.35",
+            linewidth=1.0,
+            label="teleop action target",
+        )
+        axis.set_title(f"{joint_index}: {bpx_constants.BPX_EFFECTIVE_JOINT_NAMES[joint_index]}", fontsize=9)
+        axis.grid(alpha=0.2)
+    axes.flat[0].legend(fontsize=8)
+    figure.supxlabel("episode frame (30 Hz)")
+    figure.supylabel("effective joint value")
+    figure.suptitle("Recorded robot feedback versus teleoperation target")
+    figure.savefig(output_dir / "demonstration_state_action.png", dpi=150)
+    plt.close(figure)
+
+
+def plot_chunk_overlay(
     output_dir: pathlib.Path,
     query_indices: np.ndarray,
     prediction_mean: np.ndarray,
@@ -263,6 +295,9 @@ def main(
     policy = websocket_client_policy.WebsocketClientPolicy(host=host, port=port)
     with h5py.File(episode_path, "r") as episode:
         prompt = bpx_data.read_task(episode, bpx_constants.BPX_DEFAULT_PROMPT)
+        full_episode_states = bpx_constants.to_effective_joints(
+            np.asarray(episode[bpx_data.QPOS_KEY][:], dtype=np.float64)
+        )
         full_episode_actions = bpx_constants.to_effective_joints(
             np.asarray(episode[bpx_data.ACTION_KEY][:], dtype=np.float64)
         )
@@ -295,9 +330,7 @@ def main(
             if sample_server_latencies:
                 server_inference_ms[query_position] = float(np.mean(sample_server_latencies))
             valid_horizon = min(horizon, summary.frames - int(frame_index))
-            targets[query_position, :valid_horizon] = full_episode_actions[
-                frame_index : frame_index + valid_horizon
-            ]
+            targets[query_position, :valid_horizon] = full_episode_actions[frame_index : frame_index + valid_horizon]
             print(
                 f"[{query_position + 1:03d}/{len(query_indices):03d}] frame={frame_index} "
                 f"round_trip_ms={inference_ms[query_position]:.1f}"
@@ -339,10 +372,11 @@ def main(
         inference_ms=inference_ms,
         server_inference_ms=server_inference_ms,
     )
-    _write_csvs(output_dir, metrics)
-    _plot_summary(output_dir, metrics, inference_ms)
-    _plot_joint_curves(output_dir, query_indices, predictions, prediction_std, full_episode_actions)
-    _plot_chunk_overlay(output_dir, query_indices, predictions, prediction_std, targets)
+    write_csvs(output_dir, metrics)
+    plot_summary(output_dir, metrics, inference_ms)
+    plot_joint_curves(output_dir, query_indices, predictions, prediction_std, full_episode_actions)
+    plot_state_action_curves(output_dir, full_episode_states, full_episode_actions)
+    plot_chunk_overlay(output_dir, query_indices, predictions, prediction_std, targets)
     _plot_camera_contact_sheet(output_dir, episode_path, query_indices)
     print(
         f"PASS: queries={len(query_indices)}, output={output_dir}, "
