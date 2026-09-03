@@ -151,6 +151,60 @@ def create_torch_dataset(
     return dataset
 
 
+def task_balanced_frame_weights(episode_tasks_and_lengths: Sequence[tuple[str, int]]) -> np.ndarray:
+    """Return per-frame weights for task-uniform, frame-uniform-within-task sampling."""
+    if not episode_tasks_and_lengths:
+        raise ValueError("Cannot balance an empty episode inventory")
+    frames_by_task: dict[str, int] = {}
+    for task, length in episode_tasks_and_lengths:
+        if not task:
+            raise ValueError("Every episode must have one non-empty task label")
+        if length <= 0:
+            raise ValueError(f"Episode for task {task!r} has non-positive length {length}")
+        frames_by_task[task] = frames_by_task.get(task, 0) + length
+    weights = np.concatenate(
+        [np.full(length, 1.0 / frames_by_task[task], dtype=np.float64) for task, length in episode_tasks_and_lengths]
+    )
+    if not np.all(np.isfinite(weights)) or np.any(weights <= 0):
+        raise ValueError("Task-balanced sampler produced invalid frame weights")
+    return weights
+
+
+def create_task_balanced_sampler(
+    data_config: _config.DataConfig, dataset_length: int, *, seed: int
+) -> torch.utils.data.Sampler | None:
+    """Create a deterministic weighted sampler when task balancing is enabled."""
+    if not data_config.balance_by_task:
+        return None
+    if data_config.repo_id is None or data_config.repo_id == "fake":
+        raise ValueError("Task balancing requires a real LeRobot repo_id")
+    metadata = lerobot_dataset.LeRobotDatasetMetadata(data_config.repo_id)
+    episode_inventory: list[tuple[str, int]] = []
+    for episode_index in range(metadata.total_episodes):
+        episode = metadata.episodes[episode_index]
+        tasks = episode.get("tasks", [])
+        if len(tasks) != 1:
+            raise ValueError(f"Episode {episode_index} must have exactly one task, got {tasks}")
+        episode_inventory.append((tasks[0], int(episode["length"])))
+    weights = task_balanced_frame_weights(episode_inventory)
+    if len(weights) != dataset_length:
+        raise ValueError(f"Metadata describes {len(weights)} frames but dataset has {dataset_length}")
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    logging.info(
+        "Task-balanced sampling enabled: tasks=%d episodes=%d frames=%d",
+        len({task for task, _ in episode_inventory}),
+        len(episode_inventory),
+        dataset_length,
+    )
+    return torch.utils.data.WeightedRandomSampler(
+        torch.as_tensor(weights, dtype=torch.double),
+        num_samples=dataset_length,
+        replacement=True,
+        generator=generator,
+    )
+
+
 def create_rlds_dataset(
     data_config: _config.DataConfig,
     action_horizon: int,
@@ -305,9 +359,11 @@ def create_torch_data_loader(
     # Use TorchDataLoader for both frameworks
     # For PyTorch DDP, create DistributedSampler and divide batch size by world size
     # For JAX, divide by process count
-    sampler = None
+    sampler = create_task_balanced_sampler(data_config, len(dataset), seed=seed)
     if framework == "pytorch":
         if torch.distributed.is_initialized():
+            if sampler is not None:
+                raise NotImplementedError("Task-balanced sampling is not implemented for distributed PyTorch")
             sampler = torch.utils.data.distributed.DistributedSampler(
                 dataset,
                 num_replicas=torch.distributed.get_world_size(),

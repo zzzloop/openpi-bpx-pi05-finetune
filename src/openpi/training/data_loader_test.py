@@ -1,6 +1,7 @@
 import dataclasses
 
 import jax
+import numpy as np
 
 from openpi.models import pi0_config
 from openpi.training import config as _config
@@ -82,3 +83,13 @@ def test_with_real_dataset():
 
     for _, actions in batches:
         assert actions.shape == (config.batch_size, config.model.action_horizon, config.model.action_dim)
+
+
+def test_task_balanced_frame_weights_give_each_task_equal_mass():
+    inventory = [("common", 3), ("rare", 2), ("common", 1)]
+
+    weights = _data_loader.task_balanced_frame_weights(inventory)
+
+    np.testing.assert_allclose(weights, [0.25, 0.25, 0.25, 0.5, 0.5, 0.25])
+    np.testing.assert_allclose(weights[:3].sum() + weights[-1], 1.0)
+    np.testing.assert_allclose(weights[3:5].sum(), 1.0)

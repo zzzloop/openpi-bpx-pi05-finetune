@@ -51,6 +51,7 @@ def main(
         "pi05_bpx_full",
         "pi05_bpx_full_low_mem",
         "pi05_bpx_full_low_mem_combined",
+        "pi05_bpx_full_low_mem_multitask_v2",
         "pi05_bpx_lora",
     }
     if config_name not in valid_configs:

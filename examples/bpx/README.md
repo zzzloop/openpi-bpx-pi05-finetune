@@ -3,6 +3,9 @@
 两张 48 GiB GPU（物理 GPU `2,3`）的简洁训练命令见
 [`TRAINING_2X48GB_QUICKSTART.md`](TRAINING_2X48GB_QUICKSTART.md)。
 
+多任务 V2 的去冗余重建、任务均衡归一化、训练及分阶段磁盘清理见
+[`BPX_MULTITASK_V2_REBUILD.md`](BPX_MULTITASK_V2_REBUILD.md)。
+
 本目录把已经对齐的 BPX 遥操 HDF5 数据转换为 OpenPI 使用的 LeRobot v2.1 数据集，并提供 π0.5 全参数微调与 JAX LoRA 微调配置。范围只包括数据检查、转换、训练和模型输出适配；不包含实机控制接口，也不包含仿真。
 
 实现基于 OpenPI 提交 `15a9616a00943ada6c20a0f158e3adb39df2ccac`，遵循官方的“转换为 LeRobot → 定义机器人输入/输出变换 → 计算 norm stats → 微调 → policy server”流程：
@@ -823,6 +826,8 @@ actions: (30, 23)
 | `examples/bpx/BPX_SPIKE_CLEANING_GUIDE.md` | ROS bag/HDF5毛刺审计、清洗、复核与可追溯操作规范 |
 | `examples/bpx/evaluate_bpx_bag_server.py` | 通过已启动策略服务对ROS bag做逐关节、逐horizon离线评估和可视化 |
 | `examples/bpx/BAG_CHECKPOINT_EVALUATION.md` | combined checkpoint的ROS bag离线评估与真机服务命令 |
+| `examples/bpx/build_bpx_multitask_v2_manifest.py` | 从旧固定轨迹中确定性选择代表样本并生成多任务 V2 manifest |
+| `examples/bpx/BPX_MULTITASK_V2_REBUILD.md` | V2 去冗余、任务均衡采样、归一化、训练、回退与磁盘清理手册 |
 | `examples/bpx/preflight_bpx_server.py` | 服务器软件、GPU/JAX、磁盘、base 与数据总门禁 |
 | `examples/bpx/validate_bpx_hdf5.py` | 转换前数据质量检查 |
 | `examples/bpx/preview_bpx_images.py` | RGB/BGR 四相机预览 |

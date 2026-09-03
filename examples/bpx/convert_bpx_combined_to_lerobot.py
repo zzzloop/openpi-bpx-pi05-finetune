@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import json
 import pathlib
 import shutil
@@ -14,6 +15,7 @@ import h5py
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 import numpy as np
 import tyro
+from validate_bpx_lerobot import _to_rgb_uint8
 
 from openpi.policies import bpx_constants
 
@@ -75,6 +77,30 @@ def _rosbag_frames(record: dict):
         raise ValueError(f"{path}: decoded {count} frames, manifest says {record['frames']}")
 
 
+@lru_cache(maxsize=2)
+def _load_lerobot_source(root: str) -> LeRobotDataset:
+    return LeRobotDataset("bpx/bpx_blocks", root=pathlib.Path(root))
+
+
+def _lerobot_frames(record: dict):
+    dataset = _load_lerobot_source(record["path"])
+    episode_index = int(record["source_index"])
+    episode_start = int(dataset.episode_data_index["from"][episode_index])
+    episode_end = int(dataset.episode_data_index["to"][episode_index])
+    if episode_end - episode_start != record["frames"]:
+        raise ValueError(f"Legacy LeRobot episode {episode_index}: manifest frame count changed")
+    for index in range(episode_start, episode_end):
+        item = dataset[index]
+        yield {
+            "observation.images.left_eye": _to_rgb_uint8(item["observation.images.left_eye"]),
+            "observation.images.left_wrist": _to_rgb_uint8(item["observation.images.left_wrist"]),
+            "observation.images.right_wrist": _to_rgb_uint8(item["observation.images.right_wrist"]),
+            "observation.state": np.asarray(item["observation.state"], dtype=np.float32),
+            "action": np.asarray(item["action"], dtype=np.float32),
+            "task": record["task"],
+        }
+
+
 def _create_or_resume_dataset(
     repo_id: str, records: list[dict], output_path: pathlib.Path
 ) -> tuple[LeRobotDataset, list[dict]]:
@@ -83,9 +109,10 @@ def _create_or_resume_dataset(
         if record["source_kind"] != "lerobot":
             break
         legacy_prefix.append(record)
-    if legacy_prefix:
-        if len(legacy_prefix) != 59 or [record["source_index"] for record in legacy_prefix] != list(range(59)):
-            raise ValueError("The legacy LeRobot prefix must contain episodes 0..58")
+    can_copy_full_legacy = len(legacy_prefix) == 59 and [record["source_index"] for record in legacy_prefix] == list(
+        range(59)
+    )
+    if can_copy_full_legacy:
         source_roots = {pathlib.Path(record["path"]).resolve() for record in legacy_prefix}
         if len(source_roots) != 1:
             raise ValueError("Legacy LeRobot records must reference one dataset root")
@@ -133,8 +160,11 @@ def main(
             raise FileExistsError(f"Output exists: {output_path}; pass --overwrite only after checking the target")
         shutil.rmtree(output_path)
 
-    if any(record["source_kind"] == "lerobot" for record in records[59:]):
-        raise ValueError("Legacy LeRobot records are only allowed as the first 59 manifest entries")
+    first_non_lerobot = next(
+        (index for index, record in enumerate(records) if record["source_kind"] != "lerobot"), len(records)
+    )
+    if any(record["source_kind"] == "lerobot" for record in records[first_non_lerobot:]):
+        raise ValueError("Legacy LeRobot records must form a manifest prefix")
     dataset, records_to_convert = _create_or_resume_dataset(repo_id, records, output_path)
     total_frames = dataset.num_frames
     for record in records_to_convert:
@@ -142,6 +172,8 @@ def main(
             frames = _hdf5_frames(record)
         elif record["source_kind"] == "rosbag":
             frames = _rosbag_frames(record)
+        elif record["source_kind"] == "lerobot":
+            frames = _lerobot_frames(record)
         else:
             raise ValueError(f"Unknown source kind: {record['source_kind']}")
         frame_count = 0

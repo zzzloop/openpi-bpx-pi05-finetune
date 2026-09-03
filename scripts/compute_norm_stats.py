@@ -47,11 +47,13 @@ def create_torch_dataloader(
     else:
         num_batches = len(dataset) // batch_size
         shuffle = False
+    sampler = _data_loader.create_task_balanced_sampler(data_config, len(dataset), seed=0)
     data_loader = _data_loader.TorchDataLoader(
         dataset,
         local_batch_size=batch_size,
         num_workers=num_workers,
-        shuffle=shuffle,
+        shuffle=shuffle and sampler is None,
+        sampler=sampler,
         num_batches=num_batches,
     )
     return data_loader, num_batches

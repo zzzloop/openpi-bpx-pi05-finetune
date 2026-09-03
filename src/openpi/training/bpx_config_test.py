@@ -17,6 +17,7 @@ from openpi.training import optimizer
         ("pi05_bpx_full", 64, 20_000, 2.5e-5, 0.999),
         ("pi05_bpx_full_low_mem", 2, 20_000, 2.5e-5, None),
         ("pi05_bpx_full_low_mem_combined", 2, 20_000, 2.5e-5, None),
+        ("pi05_bpx_full_low_mem_multitask_v2", 2, 20_000, 2.5e-5, None),
         ("pi05_bpx_lora", 128, 30_000, 5e-5, None),
     ],
 )
@@ -93,6 +94,23 @@ def test_bpx_combined_config_only_changes_dataset_identity():
     assert combined.data.repo_id == "bpx/bpx_blocks_combined"
     assert combined.data.assets.asset_id == "bpx/bpx_blocks_combined"
     assert combined.data.assets.assets_dir is None
+
+
+def test_bpx_multitask_v2_config_is_independent_and_task_balanced():
+    combined = config_module.get_config("pi05_bpx_full_low_mem_combined")
+    v2 = config_module.get_config("pi05_bpx_full_low_mem_multitask_v2")
+
+    assert v2.model == combined.model
+    assert v2.lr_schedule == combined.lr_schedule
+    assert v2.optimizer == combined.optimizer
+    assert v2.weight_loader == combined.weight_loader
+    assert v2.batch_size == combined.batch_size == 2
+    assert v2.ema_decay is combined.ema_decay is None
+    assert v2.data.repo_id == "bpx/bpx_blocks_multitask_v2"
+    assert v2.data.assets.asset_id == "bpx/bpx_blocks_multitask_v2"
+    assert v2.data.base_config is not None
+    assert v2.data.base_config.prompt_from_task
+    assert v2.data.base_config.balance_by_task
 
 
 def test_bpx_data_transform_order_round_trips_absolute_actions(tmp_path: pathlib.Path):
