@@ -64,7 +64,9 @@ mkdir -p "$HF_DATASETS_CACHE" "$TMPDIR" logs
 uv run examples/bpx/transcode_bpx_lerobot_images_to_video.py \
   --source-repo-id bpx/bpx_blocks_multitask_v2 \
   --output-repo-id bpx/bpx_blocks_multitask_v2_video_pilot \
-  --episode-limit 1
+  --episode-limit 1 \
+  --image-writer-threads 32 \
+  --video-encode-workers 3
 ```
 
 结尾出现 `TRANSCODE PASS` 后，再转换完整 multitask v2：
@@ -73,6 +75,8 @@ uv run examples/bpx/transcode_bpx_lerobot_images_to_video.py \
 uv run examples/bpx/transcode_bpx_lerobot_images_to_video.py \
   --source-repo-id bpx/bpx_blocks_multitask_v2 \
   --output-repo-id bpx/bpx_blocks_multitask_v2_video \
+  --image-writer-threads 32 \
+  --video-encode-workers 3 \
   2>&1 | tee logs/transcode_bpx_blocks_multitask_v2_video.log
 ```
 

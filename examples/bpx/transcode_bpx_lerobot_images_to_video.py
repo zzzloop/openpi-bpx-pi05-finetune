@@ -10,6 +10,7 @@ features were explicitly declared as ``dtype=image`` even though
 
 from __future__ import annotations
 
+from concurrent import futures
 import copy
 import pathlib
 import shutil
@@ -17,6 +18,7 @@ from typing import Any
 
 import convert_bpx_data_to_lerobot as bpx_converter
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.common.datasets.video_utils import encode_video_frames
 import numpy as np
 import pyarrow.parquet as pq
 import tyro
@@ -26,6 +28,32 @@ from validate_bpx_lerobot import _validate_metadata
 
 _AUTOMATIC_FEATURES = {"index", "episode_index", "frame_index", "timestamp", "task_index"}
 _NUMERIC_FEATURES = ("observation.state", "action")
+
+
+class _ParallelVideoLeRobotDataset(LeRobotDataset):
+    """LeRobot v2.1 writer that encodes independent camera streams concurrently."""
+
+    video_encode_workers = 1
+
+    def encode_episode_videos(self, episode_index: int) -> dict[str, str]:
+        video_keys = list(self.meta.video_keys)
+
+        def encode_one(key: str) -> tuple[str, str]:
+            video_path = self.root / self.meta.get_video_file_path(episode_index, key)
+            if not video_path.is_file():
+                image_dir = self._get_image_file_path(
+                    episode_index=episode_index,
+                    image_key=key,
+                    frame_index=0,
+                ).parent
+                encode_video_frames(image_dir, video_path, self.fps, overwrite=True)
+            return key, str(video_path)
+
+        workers = min(self.video_encode_workers, len(video_keys))
+        if workers <= 1:
+            return dict(encode_one(key) for key in video_keys)
+        with futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bpx-video") as executor:
+            return dict(executor.map(encode_one, video_keys))
 
 
 def _tree_size(path: pathlib.Path) -> int:
@@ -86,7 +114,8 @@ def main(
     output_repo_id: str,
     *,
     overwrite: bool = False,
-    image_writer_threads: int = 8,
+    image_writer_threads: int = 16,
+    video_encode_workers: int = 3,
     episode_limit: int | None = None,
     validation_samples_per_episode: int = 3,
     max_image_mae: float = 12.0,
@@ -96,6 +125,8 @@ def main(
         raise ValueError("source_repo_id and output_repo_id must differ; in-place transcoding is forbidden")
     if image_writer_threads < 1:
         raise ValueError("image_writer_threads must be at least one")
+    if video_encode_workers < 1:
+        raise ValueError("video_encode_workers must be at least one")
     if episode_limit is not None and episode_limit < 1:
         raise ValueError("episode_limit must be at least one when provided")
     if validation_samples_per_episode < 0:
@@ -120,7 +151,7 @@ def main(
         raise ValueError("Source already contains video-backed camera features")
     episode_count = source.num_episodes if episode_limit is None else min(episode_limit, source.num_episodes)
 
-    output = LeRobotDataset.create(
+    output = _ParallelVideoLeRobotDataset.create(
         repo_id=output_repo_id,
         root=output_path,
         robot_type=source.meta.robot_type,
@@ -130,6 +161,7 @@ def main(
         image_writer_processes=0,
         image_writer_threads=image_writer_threads,
     )
+    output.video_encode_workers = video_encode_workers
 
     writable_keys = [key for key in source.features if key not in _AUTOMATIC_FEATURES]
     source_global_index = 0
