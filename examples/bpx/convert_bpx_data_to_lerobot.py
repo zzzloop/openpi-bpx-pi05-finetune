@@ -42,9 +42,13 @@ def resolve_output_path(repo_id: str) -> pathlib.Path:
     return output_path
 
 
-def bpx_features() -> dict:
+def bpx_features(*, use_videos: bool = True) -> dict:
     image_feature = {
-        "dtype": "image",
+        # With explicitly supplied features LeRobot does not infer this from
+        # LeRobotDataset.create(use_videos=...).  The dtype itself must be
+        # "video" to encode episode MP4 files instead of embedding every
+        # image in Parquet.
+        "dtype": "video" if use_videos else "image",
         "shape": bpx_constants.BPX_SOURCE_IMAGE_SHAPE,
         "names": ["height", "width", "channel"],
     }
@@ -105,7 +109,7 @@ def main(
         repo_id=repo_id,
         robot_type="bpx20260310",
         fps=fps,
-        features=bpx_features(),
+        features=bpx_features(use_videos=True),
         use_videos=True,
         image_writer_threads=8,
         image_writer_processes=0,

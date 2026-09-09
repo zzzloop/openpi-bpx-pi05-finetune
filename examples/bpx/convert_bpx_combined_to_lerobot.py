@@ -117,18 +117,26 @@ def _create_or_resume_dataset(
         if len(source_roots) != 1:
             raise ValueError("Legacy LeRobot records must reference one dataset root")
         legacy_root = source_roots.pop()
-        print(f"Copying validated legacy LeRobot dataset without re-encoding: {legacy_root} -> {output_path}")
-        shutil.copytree(legacy_root, output_path)
-        dataset = LeRobotDataset(repo_id, root=output_path)
-        if dataset.num_episodes != 59 or dataset.num_frames != 67_455:
-            raise ValueError("Copied legacy LeRobot dataset does not have the expected 59/67,455 contract")
-        remaining = records[len(legacy_prefix) :]
-    else:
+        legacy_dataset = LeRobotDataset("bpx/bpx_blocks", root=legacy_root)
+        # A previous BPX converter declared explicit camera features as
+        # dtype=image. Copying such a prefix would force the whole combined
+        # dataset to remain image-in-Parquet despite use_videos=True.
+        can_copy_full_legacy = set(legacy_dataset.meta.video_keys) == {
+            f"observation.images.{camera}" for camera in bpx_constants.BPX_IMAGE_KEYS
+        }
+        if can_copy_full_legacy:
+            print(f"Copying validated video-backed legacy LeRobot dataset: {legacy_root} -> {output_path}")
+            shutil.copytree(legacy_root, output_path)
+            dataset = LeRobotDataset(repo_id, root=output_path)
+            if dataset.num_episodes != 59 or dataset.num_frames != 67_455:
+                raise ValueError("Copied legacy LeRobot dataset does not have the expected 59/67,455 contract")
+            remaining = records[len(legacy_prefix) :]
+    if not can_copy_full_legacy:
         dataset = LeRobotDataset.create(
             repo_id=repo_id,
             robot_type="bpx20260310",
             fps=bpx_constants.BPX_FPS,
-            features=legacy_converter.bpx_features(),
+            features=legacy_converter.bpx_features(use_videos=True),
             use_videos=True,
             image_writer_threads=8,
             image_writer_processes=0,
