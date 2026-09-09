@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenPI · BPX Research Studio</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <header><div class="logo">π</div><div><small>OPENPI · BPX LAB</small><h1>Research Data Studio</h1></div><span id="connection" class="pill">连接中</span></header>
+    <main>
+      <section class="hero">
+        <div><b>DATA → POLICY</b><h2>可复现的数据工程与训练控制台</h2><p>审计、毛刺清洗、归一化、派生格式和训练任务，统一记录命令、日志、进度与指标。</p></div>
+        <aside><div class="title"><h3>服务器状态</h3><button id="refreshSystem">刷新</button></div><div id="gpuGrid">等待 GPU 信息…</div><div class="disk"><span>数据盘</span><strong id="diskUsage">—</strong></div><progress id="diskMeter" max="100" value="0"></progress></aside>
+      </section>
+
+      <section class="card"><div class="section-title"><h2><em>00</em>运行环境</h2><span>默认大文件根目录：/scratch/bpx_datasets</span></div><div class="grid three">
+        <label>OpenPI 根目录<input id="openpiRoot" /></label><label>LeRobot 数据根目录<input id="hfLerobotHome" /></label><label>Checkpoint 根目录<input id="checkpointRoot" /></label>
+        <label>Hugging Face 缓存<input id="hfHome" /></label><label>Datasets 缓存<input id="hfDatasetsCache" /></label><label>临时目录<input id="tmpdir" /></label><label>uv 缓存<input id="uvCacheDir" /></label>
+      </div></section>
+
+      <nav><button class="active" data-tab="audit">01 数据审计</button><button data-tab="spikes">02 毛刺清洗</button><button data-tab="normalize">03 归一化</button><button data-tab="export">04 格式导出</button><button data-tab="train">05 模型训练</button></nav>
+
+      <section class="card panel active" data-panel="audit"><div class="section-title"><h2><em>01</em>LeRobot 数据集审计</h2><span>结构、索引、时间戳、维度、有限值与 MP4</span></div><div class="grid three">
+        <label class="wide">数据集目录<input id="auditDataset" /></label><label>并行进程<input id="auditWorkers" type="number" value="32" /></label><label>视频检查<select id="auditVideoCheck"><option value="headers">容器/尺寸/FPS</option><option value="full">全帧解码</option><option value="none">仅路径核对</option></select></label><label class="wide">报告 JSON<input id="auditReport" /></label>
+      </div><button id="startAudit" class="primary">开始只读审计</button></section>
+
+      <section class="card panel" data-panel="spikes"><div class="section-title"><h2><em>02</em>毛刺扫描与清洗</h2><span>先扫描；清洗只生成独立版本</span></div><div class="grid three">
+        <label class="wide">权威源数据集<input id="spikeSource" /></label><label>并行进程<input id="spikeWorkers" type="number" value="32" /></label><label>逐维阈值 JSON<input id="thresholdsPath" /></label><label>报告 JSON<input id="spikeReport" /></label><label class="wide">清洗输出目录<input id="cleanOutput" /></label>
+      </div><div class="buttons"><button id="scanSpikes">仅扫描</button><button id="cleanSpikes" class="primary">生成清洗版本并复审</button></div></section>
+
+      <section class="card panel" data-panel="normalize"><div class="section-title"><h2><em>03</em>OpenPI 归一化</h2><span>32 workers；处理全部数据，不抽样</span></div><div class="grid three"><label class="wide">Config name<input id="normConfig" /></label><label>DataLoader workers<input id="normWorkers" type="number" value="32" /></label></div><button id="startNormalize" class="primary">计算归一化统计</button></section>
+
+      <section class="card panel" data-panel="export"><div class="section-title"><h2><em>04</em>派生格式导出</h2><span>LeRobot 保持权威源，不做覆盖</span></div><div class="grid three">
+        <label class="wide">LeRobot 源目录<input id="exportSource" /></label><label class="wide">HDF5 输出目录<input id="exportOutput" /></label><label>并行 episode<input id="exportWorkers" type="number" value="4" /></label><label>压缩<select id="exportCompression"><option>gzip</option><option>lzf</option><option>none</option></select></label><label>gzip level<input id="compressionLevel" type="number" value="4" /></label>
+      </div><button id="startExport" class="primary">导出 HDF5</button></section>
+
+      <section class="card panel" data-panel="train"><div class="section-title"><h2><em>05</em>OpenPI 训练</h2><span>关键参数全部显式记录</span></div><div class="grid four">
+        <label class="wide">Config name<input id="trainConfig" /></label><label class="wide">Experiment name<input id="expName" /></label><label>CUDA 设备<input id="cudaDevices" value="2,3" /></label><label>XLA 显存比例<input id="memoryFraction" value="0.96" /></label><label>Global batch<input id="batchSize" type="number" value="2" /></label><label>FSDP devices<input id="fsdpDevices" type="number" value="2" /></label><label>训练 steps<input id="trainSteps" type="number" value="200000" /></label><label>保存间隔<input id="saveInterval" type="number" value="5000" /></label><label>长期保留间隔<input id="keepPeriod" type="number" value="25000" /></label><label>模式<select id="trainMode"><option value="overwrite">新实验 / overwrite</option><option value="resume">断点续训 / resume</option></select></label>
+      </div><button id="startTrain" class="primary">启动训练</button></section>
+
+      <section class="monitor"><article class="card jobs"><div class="title"><h2>任务记录</h2><button id="refreshJobs">刷新</button></div><div id="jobList">暂无任务</div></article><article class="card details"><div class="title"><div><small id="selectedKind">NO JOB</small><h2 id="selectedTitle">选择任务查看详情</h2></div><button id="cancelJob" class="danger" hidden>终止任务</button></div><div class="progress-line"><span id="progressText">0 / 0</span><strong id="progressPercent">0%</strong></div><progress id="progressBar" max="100" value="0"></progress><div class="metrics"><div>LOSS<strong id="metricLoss">—</strong></div><div>GRAD NORM<strong id="metricGrad">—</strong></div><div>LEARNING RATE<strong id="metricLr">—</strong></div><div>STATUS<strong id="metricStatus">—</strong></div></div><div class="charts"><svg id="lossChart" viewBox="0 0 600 170"></svg><svg id="normChart" viewBox="0 0 600 170"></svg></div><details><summary>受控命令与环境</summary><pre id="commandText">—</pre></details><pre id="jobLog" class="log">任务日志将在这里显示。</pre></article></section>
+    </main><div id="toast"></div><script src="/static/app.js"></script>
+  </body>
+</html>

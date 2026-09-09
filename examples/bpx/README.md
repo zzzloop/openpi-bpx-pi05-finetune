@@ -12,6 +12,7 @@
 
 - [OpenPI README：自定义数据微调](../../README.md)
 - [OpenPI UR5 自定义机器人示例](../ur5/README.md)
+- [服务器数据、清洗、归一化与训练控制台](SERVER_DATA_TRAINING_STUDIO.md)
 - [OpenPI 归一化说明](../../docs/norm_stats.md)
 - [OpenPI 远程推理说明](../../docs/remote_inference.md)
 - [OpenPI 固定的 LeRobot v2.1 实现](https://github.com/huggingface/lerobot/blob/0cf864870cf29f4738d3ade893e6fd13fbd7cdb5/lerobot/common/datasets/lerobot_dataset.py)
