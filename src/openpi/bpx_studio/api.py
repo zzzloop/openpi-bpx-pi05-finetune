@@ -25,11 +25,14 @@ import uvicorn
 from openpi.bpx_studio.commands import build_audit
 from openpi.bpx_studio.commands import build_hdf5_export
 from openpi.bpx_studio.commands import build_normalize
+from openpi.bpx_studio.commands import build_policy_serve
 from openpi.bpx_studio.commands import build_spike_job
 from openpi.bpx_studio.commands import build_train
 from openpi.bpx_studio.jobs import JobManager
 
 DEFAULT_DATA_ROOT = pathlib.Path("/scratch/bpx_datasets")
+DEFAULT_CONFIG_NAME = "pi05_bpx_full_low_mem_multitask_v2"
+DEFAULT_DATASET_NAME = "bpx_v2_humanoid"
 
 
 class DataEnvironment(BaseModel):
@@ -84,8 +87,19 @@ class TrainRequest(DataEnvironment):
     mode: Literal["overwrite", "resume"] = "overwrite"
 
 
+class ServeRequest(BaseModel):
+    openpi_root: str
+    config_name: str = DEFAULT_CONFIG_NAME
+    checkpoint_dir: str
+    cuda_devices: str = "2,3"
+    memory_fraction: float = Field(default=0.96, ge=0.1, le=1.0)
+
+
 def default_paths(data_root: pathlib.Path) -> dict[str, str]:
     root = data_root.expanduser().resolve()
+    lerobot_root = root / "lerobot"
+    raw_dataset = lerobot_root / "bpx" / f"{DEFAULT_DATASET_NAME}_raw"
+    clean_dataset = lerobot_root / "bpx" / DEFAULT_DATASET_NAME
     return {
         "data_root": str(root),
         "hf_lerobot_home": str(root / "lerobot"),
@@ -98,7 +112,47 @@ def default_paths(data_root: pathlib.Path) -> dict[str, str]:
         "cleaned_root": str(root / "cleaned"),
         "exports_root": str(root / "exports"),
         "state_root": str(root / "dashboard_state"),
+        "raw_dataset": str(raw_dataset),
+        "clean_dataset": str(clean_dataset),
+        "audit_report": str(root / "reports" / f"{DEFAULT_DATASET_NAME}_audit.json"),
+        "spike_report": str(root / "reports" / f"{DEFAULT_DATASET_NAME}_spikes.json"),
+        "hdf5_export": str(root / "exports" / f"{DEFAULT_DATASET_NAME}_hdf5"),
     }
+
+
+def _checkpoints(checkpoint_root: pathlib.Path) -> list[dict[str, str | int]]:
+    records = []
+    if not checkpoint_root.is_dir():
+        return records
+    for params in checkpoint_root.glob("*/*/*/params"):
+        step_dir = params.parent
+        if not step_dir.name.isdigit() or not (step_dir / "assets").is_dir():
+            continue
+        records.append(
+            {
+                "config_name": step_dir.parents[1].name,
+                "experiment_name": step_dir.parent.name,
+                "step": int(step_dir.name),
+                "path": str(step_dir.resolve()),
+            }
+        )
+    return sorted(
+        records,
+        key=lambda item: (str(item["config_name"]), str(item["experiment_name"]), int(item["step"])),
+        reverse=True,
+    )
+
+
+def _next_experiment(checkpoint_root: pathlib.Path, config_name: str) -> str:
+    if pathlib.Path(config_name).name != config_name or not config_name:
+        raise ValueError("config_name 不是安全的单级名称")
+    prefix = f"{DEFAULT_DATASET_NAME}_bs2_v"
+    existing = {path.name for path in (checkpoint_root / config_name).glob(f"{prefix}*")}
+    for version in range(1, 10000):
+        candidate = f"{prefix}{version:03d}"
+        if candidate not in existing:
+            return candidate
+    raise RuntimeError("无法生成新的实验编号")
 
 
 def _load_or_create_token(state_dir: pathlib.Path) -> str:
@@ -166,7 +220,25 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
 
     @app.get("/api/config", dependencies=[Depends(authenticate)])
     async def config():
-        return {"default_openpi_root": str(project_root), "default_workers": 32, **default_paths(data_root)}
+        checkpoint_root = data_root / "checkpoints"
+        return {
+            "default_openpi_root": str(project_root),
+            "default_workers": 32,
+            "default_config_name": DEFAULT_CONFIG_NAME,
+            "default_experiment_name": _next_experiment(checkpoint_root, DEFAULT_CONFIG_NAME),
+            **default_paths(data_root),
+        }
+
+    @app.get("/api/checkpoints", dependencies=[Depends(authenticate)])
+    async def checkpoints():
+        return _checkpoints(data_root / "checkpoints")
+
+    @app.get("/api/next-experiment", dependencies=[Depends(authenticate)])
+    async def next_experiment(config_name: str = DEFAULT_CONFIG_NAME):
+        try:
+            return {"experiment_name": _next_experiment(data_root / "checkpoints", config_name)}
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.get("/api/system", dependencies=[Depends(authenticate)])
     async def system(path: str = ""):
@@ -229,6 +301,10 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
     async def start_train(request: TrainRequest):
         return start("train", lambda: build_train(request.model_dump()))
 
+    @app.post("/api/jobs/serve", dependencies=[Depends(authenticate)])
+    async def start_serve(request: ServeRequest):
+        return start("policy_serve", lambda: build_policy_serve(request.model_dump()))
+
     @app.post("/api/jobs/{job_id}/cancel", dependencies=[Depends(authenticate)])
     async def cancel(job_id: str):
         try:
@@ -256,8 +332,23 @@ def main() -> None:
         (args.data_root or pathlib.Path(os.environ.get("BPX_DATA_ROOT", DEFAULT_DATA_ROOT))).expanduser().resolve()
     )
     state_dir = (args.state_dir or data_root / "dashboard_state").expanduser().resolve()
-    for path in default_paths(data_root).values():
-        pathlib.Path(path).mkdir(parents=True, exist_ok=True)
+    paths = default_paths(data_root)
+    # Only create infrastructure directories here. Dataset/output paths must
+    # remain absent until data is transferred or the corresponding job starts.
+    for key in (
+        "data_root",
+        "hf_lerobot_home",
+        "checkpoint_root",
+        "hf_home",
+        "hf_datasets_cache",
+        "uv_cache_dir",
+        "tmpdir",
+        "reports_root",
+        "cleaned_root",
+        "exports_root",
+        "state_root",
+    ):
+        pathlib.Path(paths[key]).mkdir(parents=True, exist_ok=True)
     app = create_app(state_dir=state_dir, project_root=project_root, data_root=data_root)
     shown_host = "127.0.0.1" if args.host == "0.0.0.0" else args.host
     logging.basicConfig(level=logging.INFO)

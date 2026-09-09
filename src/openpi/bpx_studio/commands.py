@@ -58,7 +58,12 @@ def _positive(value: int, label: str, *, maximum: int | None = None) -> int:
 
 def _openpi_root(value: str) -> pathlib.Path:
     root = _existing_directory(value, "OpenPI 根目录")
-    for relative in ("scripts/compute_norm_stats.py", "scripts/train.py", "pyproject.toml"):
+    for relative in (
+        "scripts/compute_norm_stats.py",
+        "scripts/serve_policy.py",
+        "scripts/train.py",
+        "pyproject.toml",
+    ):
         if not (root / relative).is_file():
             raise ValueError(f"OpenPI 根目录缺少 {relative}: {root}")
     return root
@@ -216,4 +221,34 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
         cwd=root,
         env=env,
         total_units=steps,
+    )
+
+
+def build_policy_serve(values: Mapping[str, object]) -> CommandSpec:
+    root = _openpi_root(str(values["openpi_root"]))
+    config = _name(str(values["config_name"]), "推理配置名")
+    checkpoint = _existing_directory(str(values["checkpoint_dir"]), "checkpoint 目录")
+    for child in ("params", "assets"):
+        if not (checkpoint / child).is_dir():
+            raise ValueError(f"checkpoint 缺少 {child}/: {checkpoint}")
+    cuda_devices = str(values.get("cuda_devices", "2,3")).strip()
+    if not _CUDA_DEVICES.fullmatch(cuda_devices):
+        raise ValueError("CUDA 设备必须写成逗号分隔的非负整数; 例如 2,3")
+    memory_fraction = float(values.get("memory_fraction", 0.96))
+    if not 0.1 <= memory_fraction <= 1.0:
+        raise ValueError("XLA 显存比例必须在 0.1 到 1.0 之间")
+    return CommandSpec(
+        argv=(
+            "uv",
+            "run",
+            "scripts/serve_policy.py",
+            "policy:checkpoint",
+            f"--policy.config={config}",
+            f"--policy.dir={checkpoint}",
+        ),
+        cwd=root,
+        env={
+            "CUDA_VISIBLE_DEVICES": cuda_devices,
+            "XLA_PYTHON_CLIENT_MEM_FRACTION": f"{memory_fraction:.4g}",
+        },
     )

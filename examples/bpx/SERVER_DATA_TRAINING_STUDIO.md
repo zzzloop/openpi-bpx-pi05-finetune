@@ -31,25 +31,25 @@
 ```bash
 cd ~/zzk_data/openpi-bpx-pi05-finetune
 
-export BPX_DATA_ROOT=/scratch/bpx_datasets
 mkdir -p \
-  "$BPX_DATA_ROOT"/lerobot \
-  "$BPX_DATA_ROOT"/cleaned \
-  "$BPX_DATA_ROOT"/exports \
-  "$BPX_DATA_ROOT"/checkpoints \
-  "$BPX_DATA_ROOT"/reports \
-  "$BPX_DATA_ROOT"/cache/huggingface/datasets \
-  "$BPX_DATA_ROOT"/cache/uv \
-  "$BPX_DATA_ROOT"/tmp \
-  "$BPX_DATA_ROOT"/dashboard_state
+  /scratch/bpx_datasets/lerobot \
+  /scratch/bpx_datasets/cleaned \
+  /scratch/bpx_datasets/exports \
+  /scratch/bpx_datasets/checkpoints \
+  /scratch/bpx_datasets/reports \
+  /scratch/bpx_datasets/cache/huggingface/datasets \
+  /scratch/bpx_datasets/cache/uv \
+  /scratch/bpx_datasets/tmp \
+  /scratch/bpx_datasets/dashboard_state
 
 uv sync
 uv run --with 'fastapi>=0.115' --with 'uvicorn>=0.34' \
   python -m openpi.bpx_studio.api \
   --host 127.0.0.1 \
-  --port 8866 \
-  --data-root "$BPX_DATA_ROOT"
+  --port 8866
 ```
+
+`/scratch/bpx_datasets` 已经是程序内置默认值，因此日常启动不需要重复 `export BPX_DATA_ROOT`，也不需要传 `--data-root`；只有迁移数据盘时才使用这两个覆盖入口。
 
 终端会打印带随机控制令牌的 URL。控制台仅监听服务器本机；从工作电脑访问时使用 SSH 隧道：
 
@@ -61,12 +61,28 @@ ssh -L 8866:127.0.0.1:8866 kemove@训练服务器IP
 
 ## 推荐操作顺序
 
-1. 在“数据审计”中选择 `/scratch/bpx_datasets/lerobot/<组织>/<数据集>`。`headers` 会逐个核对 MP4 容器、尺寸和 FPS；正式冻结数据集前再执行一次 `full` 全帧解码。
-2. 先执行“仅扫描毛刺”，人工审核 JSON 报告。逐维阈值必须与当前机器人的 state/action 维度和单位匹配。
-3. 确认后再“生成清洗版本”。工具用硬链接快速复制，只有发生修复的 Parquet 会被原子替换；源数据集保持不变，并对输出重新审计。
-4. 需要兼容其他工具时再从 LeRobot 导出 HDF5。导出目录不可已存在，结果附带 SHA-256 manifest。
-5. 选择与数据集对应的 OpenPI config，使用 32 workers 计算全部归一化统计。
-6. 检查 `norm_stats.json` 后启动训练。两张 48 GiB GPU 的已验证基线为 CUDA `2,3`、显存比例 `0.96`、global batch `2`、FSDP `2`。
+约定的数据流如下；仪表盘会自动填入这些路径：
+
+```text
+采集仓库 recordings/lerobot/bpx_v2_humanoid_raw
+  → /scratch/bpx_datasets/lerobot/bpx/bpx_v2_humanoid_raw
+  → 数据审计与毛刺扫描
+  → /scratch/bpx_datasets/lerobot/bpx/bpx_v2_humanoid
+  → 归一化
+  → OpenPI 训练
+  → /scratch/bpx_datasets/checkpoints/<config>/<experiment>/<step>
+  → checkpoint 推理服务
+```
+
+1. 将工控机采集仓库 `recordings/lerobot/bpx_v2_humanoid_raw` 中冻结的数据集同步到服务器对应的 `_raw` 目录。
+2. `headers` 审计会逐个核对 MP4 容器、尺寸和 FPS；正式冻结数据集前再执行一次 `full` 全帧解码。
+3. 先执行“仅扫描毛刺”，人工审核 JSON 报告。逐维阈值必须与当前机器人的 state/action 维度和单位匹配。
+4. 确认后再“生成清洗版本”。工具用硬链接快速复制，只有发生修复的 Parquet 会被原子替换；源数据集保持不变，并对输出重新审计。
+5. 需要兼容其他工具时再从清洗后的 LeRobot 导出 HDF5。导出目录不可已存在，结果附带 SHA-256 manifest。
+6. 归一化和训练默认共用 `pi05_bpx_full_low_mem_multitask_v2`。这是当前已有模型的可运行默认值；二代机器人 OpenPI config 完成后，应统一换成二代 config 名，不能混用旧机器人的特征契约和归一化统计。
+7. 默认使用 32 workers 计算全部归一化统计。检查 `norm_stats.json` 后启动训练。两张 48 GiB GPU 的已验证基线为 CUDA `2,3`、显存比例 `0.96`、global batch `2`、FSDP `2`。
+8. Experiment name 会检查当前 config 的已有目录并从 `bpx_v2_humanoid_bs2_v001` 开始递增，防止覆盖已有实验；仍允许人工改名。
+9. “模型推理”会扫描 `/scratch/bpx_datasets/checkpoints` 下同时具有 `params/` 和 `assets/` 的完整 checkpoint，忽略 `.orbax-checkpoint-tmp-*`，并启动仓库原生 `serve_policy.py`。停止按钮会终止该推理任务。
 
 ## 毛刺阈值文件
 
