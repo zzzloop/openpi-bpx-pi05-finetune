@@ -82,7 +82,7 @@ ssh -L 8866:127.0.0.1:8866 kemove@训练服务器IP
 6. 归一化和训练默认共用 `pi05_bpx_full_low_mem_multitask_v2`。这是当前已有模型的可运行默认值；二代机器人 OpenPI config 完成后，应统一换成二代 config 名，不能混用旧机器人的特征契约和归一化统计。
 7. 默认使用 32 workers 计算全部归一化统计。检查 `norm_stats.json` 后启动训练。两张 48 GiB GPU 的已验证基线为 CUDA `2,3`、显存比例 `0.96`、global batch `2`、FSDP `2`。
 8. Experiment name 会检查当前 config 的已有目录并从 `bpx_v2_humanoid_bs2_v001` 开始递增，防止覆盖已有实验；仍允许人工改名。
-9. “模型推理”会扫描 `/scratch/bpx_datasets/checkpoints` 下同时具有 `params/` 和 `assets/` 的完整 checkpoint，忽略 `.orbax-checkpoint-tmp-*`，并启动仓库原生 `serve_policy.py`。停止按钮会终止该推理任务。
+9. “模型推理”会扫描 `/scratch/bpx_datasets/checkpoints` 下所有 config 和 experiment 中同时具有 `params/` 和 `assets/` 的完整 checkpoint，忽略 `.orbax-checkpoint-tmp-*`。列表完整显示 `Config / Experiment / Step`，选择后自动匹配推理 Config，再启动仓库原生 `serve_policy.py`。停止按钮会终止该推理任务。
 
 ## 毛刺阈值文件
 

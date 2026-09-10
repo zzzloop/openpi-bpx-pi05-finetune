@@ -37,9 +37,14 @@ def test_checkpoint_discovery_ignores_incomplete_saves_and_increments_experiment
     complete = tmp_path / "config" / "bpx_v2_humanoid_bs2_v001" / "200000"
     (complete / "params").mkdir(parents=True)
     (complete / "assets").mkdir()
+    other_config = tmp_path / "other_config" / "legacy_experiment" / "60000"
+    (other_config / "params").mkdir(parents=True)
+    (other_config / "assets").mkdir()
     incomplete = tmp_path / "config" / "bpx_v2_humanoid_bs2_v002" / "25000.orbax-checkpoint-tmp-1"
     (incomplete / "params").mkdir(parents=True)
-    assert [record["path"] for record in _checkpoints(tmp_path)] == [str(complete.resolve())]
+    records = _checkpoints(tmp_path)
+    assert {record["path"] for record in records} == {str(complete.resolve()), str(other_config.resolve())}
+    assert {record["config_name"] for record in records} == {"config", "other_config"}
     assert _next_experiment(tmp_path, "config") == "bpx_v2_humanoid_bs2_v003"
 
 
