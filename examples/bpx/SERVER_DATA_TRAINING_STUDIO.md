@@ -107,6 +107,12 @@ HF_LEROBOT_HOME/<repo_id>
 
 当前默认 `pi05_bpx_full_low_mem_multitask_v2` 是**第一代机器人已有模型的兼容入口**，实际读取 `bpx/bpx_blocks_multitask_v2`，并不等于尚未定型的二代清洗目录 `bpx/bpx_v2_humanoid`。在二代机器人的关节顺序、动作维度、相机键和末端执行器契约确定前，不能安全地伪造一个二代 Config。契约完成后必须新增二代专用 Config，使其 `repo_id` 指向 `bpx/bpx_v2_humanoid`，届时页面会自动显示全链路贯通。
 
+视频检查下拉框只改变 MP4 检查强度；无论选择哪一项，Parquet 中的 state/action 有限值与维度、episode/frame/task 索引以及时间戳都会完整检查：`none` 只核对 MP4 路径集合，`headers` 还逐个打开容器检查视频流、尺寸和 FPS，`full` 再逐帧解码并核对精确帧数。
+
+毛刺修复只处理按阈值识别出的 `observation.state` 与 `action` 孤立单帧异常，以前后帧均值替换。它不会对整段轨迹做低通平滑，也不会修改连续异常、首尾帧、正常快速动作或视频。清洗输出使用硬链接节省空间：在同一文件系统上删除原始目录后，清洗目录中的链接及已重写 Parquet 仍然有效；但会失去重新调整阈值并复现清洗的原始基线，因此正式论文数据建议冷备原始集、毛刺报告和阈值文件。
+
+`norm_stats.json` 仅保存各数值维度的均值、标准差和分位数等统计量，不复制视频或 episode，通常只有数 KB。放在仓库 `assets/<config>/<repo_id>/` 下是 OpenPI 的既定绑定方式；控制台会同时显示实际大小，并验证计算写入位置与训练加载位置完全相同。
+
 ## 毛刺阈值文件
 
 阈值文件必须为每个 state/action 维度分别提供跳变阈值和邻点一致阈值：

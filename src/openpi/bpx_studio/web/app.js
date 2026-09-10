@@ -92,6 +92,14 @@ function renderConfigProfile(profile) {
   $("trainStatsSource").value = profile.loaded_stats_path;
   $("normPurpose").textContent = `配置用途：${profile.purpose}`;
   $("trainPurpose").textContent = `配置用途：${profile.purpose}`;
+  $("normDatasetState").textContent = profile.dataset_exists ? "目录存在 · 可读取" : "目录不存在";
+  $("normDatasetState").className = profile.dataset_exists ? "ok-text" : "warn-text";
+  $("normStatsBinding").textContent = profile.stats_paths_match ? "写入 = 训练加载" : "路径不一致 · 已阻止";
+  $("normStatsBinding").className = profile.stats_paths_match ? "ok-text" : "bad-text";
+  $("normStatsSize").textContent = profile.computed_stats_exists
+    ? `${human(profile.stats_size_bytes)} · 已生成`
+    : "尚未生成 · 预计仅数 KB";
+  $("normStatsSize").className = profile.computed_stats_exists ? "ok-text" : "muted-text";
 
   $("flowRaw").textContent = value("spikeSource") || "—";
   $("flowClean").textContent = value("cleanOutput") || "—";
@@ -138,6 +146,12 @@ function renderConfigError(error) {
     .forEach((id) => { $(id).value = "无法解析"; });
   $("normPurpose").textContent = `配置解析失败：${error.message}`;
   $("trainPurpose").textContent = $("normPurpose").textContent;
+  $("normDatasetState").textContent = "Config 解析失败";
+  $("normDatasetState").className = "bad-text";
+  $("normStatsBinding").textContent = "无法验证";
+  $("normStatsBinding").className = "bad-text";
+  $("normStatsSize").textContent = "无法读取";
+  $("normStatsSize").className = "muted-text";
   setBinding($("normBinding"), "bad", "Config 必须先在 OpenPI 训练配置中注册，才能计算归一化统计或训练。");
   $("flowStatus").className = "flow-status bad";
   $("flowStatus").textContent = "Config 无法解析";
@@ -178,6 +192,24 @@ document.querySelectorAll("nav button").forEach((button) => {
     button.classList.add("active");
     document.querySelector(`[data-panel='${button.dataset.tab}']`).classList.add("active");
   };
+});
+
+const auditModeDescriptions = {
+  none: "仍会全量审计 Parquet、索引、时间戳和数值；视频只检查文件路径集合，不打开 MP4。",
+  headers: "推荐日常使用：逐个打开 MP4，验证视频流、分辨率和 FPS，但不解码全部帧。",
+  full: "冻结训练集前使用：在 Header 检查基础上解码每一帧，并核对视频帧数与 episode 帧数。",
+};
+
+function renderAuditMode() {
+  const mode = value("auditVideoCheck");
+  $("auditModeHelp").textContent = auditModeDescriptions[mode];
+  document.querySelectorAll("#auditModeGuide [data-mode]")
+    .forEach((node) => node.classList.toggle("active", node.dataset.mode === mode));
+}
+
+$("auditVideoCheck").addEventListener("change", () => {
+  renderAuditMode();
+  save();
 });
 
 $("startAudit").onclick = () => start("/api/jobs/audit", {
@@ -383,6 +415,7 @@ $("checkpointRoot").addEventListener("change", async () => {
 });
 
 async function init() {
+  renderAuditMode();
   if (localStorage.getItem("bpx-defaults-version") !== defaultsVersion) {
     ["auditDataset", "auditReport", "spikeSource", "spikeReport", "cleanOutput", "exportSource", "exportOutput", "normConfig", "trainConfig", "serveConfig", "expName"]
       .forEach((id) => localStorage.removeItem(`bpx-${id}`));

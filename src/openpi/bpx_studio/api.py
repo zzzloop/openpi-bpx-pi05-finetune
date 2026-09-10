@@ -173,7 +173,7 @@ def _config_profile(
     project_root: pathlib.Path,
     lerobot_root: pathlib.Path,
     train_config,
-) -> dict[str, str | bool]:
+) -> dict[str, str | bool | int]:
     data_factory = train_config.data
     repo_id = getattr(data_factory, "repo_id", None)
     if not isinstance(repo_id, str) or not repo_id or repo_id == "fake":
@@ -194,14 +194,19 @@ def _config_profile(
         train_config.name,
         "自定义 OpenPI 配置; 请根据 repo_id、输入映射、动作维度和归一化资产人工复核用途。",
     )
+    computed_stats_path = (computed_stats_dir / "norm_stats.json").resolve()
+    loaded_stats_path = (loaded_stats_dir / "norm_stats.json").resolve()
     return {
         "config_name": train_config.name,
         "repo_id": repo_id,
         "dataset_path": str(dataset_path),
         "dataset_exists": dataset_path.is_dir(),
-        "computed_stats_path": str((computed_stats_dir / "norm_stats.json").resolve()),
-        "loaded_stats_path": str((loaded_stats_dir / "norm_stats.json").resolve()),
+        "computed_stats_path": str(computed_stats_path),
+        "loaded_stats_path": str(loaded_stats_path),
         "stats_paths_match": computed_stats_dir.resolve() == loaded_stats_dir,
+        "computed_stats_exists": computed_stats_path.is_file(),
+        "loaded_stats_exists": loaded_stats_path.is_file(),
+        "stats_size_bytes": computed_stats_path.stat().st_size if computed_stats_path.is_file() else 0,
         "purpose": purpose,
     }
 

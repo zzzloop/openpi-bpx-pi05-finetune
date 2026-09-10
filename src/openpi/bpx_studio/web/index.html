@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>OpenPI · BPX Research Studio</title>
     <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="/static/guidance.css" />
   </head>
   <body>
     <header><div class="logo">π</div><div><small>OPENPI · BPX LAB</small><h1>Research Data Studio</h1></div><span class="version">SERVER PIPELINE</span><span id="connection" class="pill">连接中</span></header>
@@ -31,19 +32,19 @@
 
       <nav><button class="active" data-tab="audit">01 数据审计</button><button data-tab="spikes">02 毛刺清洗</button><button data-tab="normalize">03 归一化</button><button data-tab="export">04 格式导出</button><button data-tab="train">05 模型训练</button><button data-tab="serve">06 模型推理</button></nav>
 
-      <section class="card panel active" data-panel="audit"><div class="section-title"><h2><em>01</em>LeRobot 数据集审计</h2><span>结构、索引、时间戳、维度、有限值与 MP4</span></div><div class="grid three">
-        <label class="wide">数据集目录<input id="auditDataset" /></label><label>并行进程<input id="auditWorkers" type="number" value="32" /></label><label>视频检查<select id="auditVideoCheck"><option value="headers">容器/尺寸/FPS</option><option value="full">全帧解码</option><option value="none">仅路径核对</option></select></label><label class="wide">报告 JSON<input id="auditReport" /></label>
-      </div><button id="startAudit" class="primary">开始只读审计</button></section>
+      <section class="card panel active" data-panel="audit"><div class="section-title"><h2><em>01</em>LeRobot 数据集审计</h2><span>数值与索引始终全量检查；下拉框只控制视频检查强度</span></div><div class="grid three">
+        <label class="wide">数据集目录<input id="auditDataset" /><small>读取 LeRobot 的 meta、data 与 videos，不修改任何文件。</small></label><label>并行进程<input id="auditWorkers" type="number" value="32" /><small>Parquet 和视频任务的最大并行数。</small></label><label>视频检查<select id="auditVideoCheck"><option value="headers">打开容器：尺寸 / FPS（推荐）</option><option value="full">逐帧完整解码（冻结前）</option><option value="none">仅核对视频路径（最快）</option></select><small id="auditModeHelp">—</small></label><label class="wide">报告 JSON<input id="auditReport" /><small>记录 episode、frame、任务、维度、FPS 和视频检查模式。</small></label>
+      </div><div class="mode-guide" id="auditModeGuide"><article data-mode="none"><b>PATH</b><strong>仅路径核对</strong><span>核对 MP4 应有/实有集合，不打开视频。</span></article><article data-mode="headers"><b>HEADER</b><strong>容器 / 尺寸 / FPS</strong><span>逐个打开 MP4，检查视频流、分辨率和帧率。</span></article><article data-mode="full"><b>DECODE</b><strong>全帧解码</strong><span>再解码每一帧，并与 Parquet episode 帧数精确比较。</span></article></div><button id="startAudit" class="primary">开始只读审计</button></section>
 
-      <section class="card panel" data-panel="spikes"><div class="section-title"><h2><em>02</em>毛刺扫描与清洗</h2><span>先扫描；清洗只生成独立版本</span></div><div class="grid three">
-        <label class="wide">权威源数据集<input id="spikeSource" /></label><label>并行进程<input id="spikeWorkers" type="number" value="32" /></label><label>逐维阈值 JSON<input id="thresholdsPath" /></label><label>报告 JSON<input id="spikeReport" /></label><label class="wide">清洗输出目录<input id="cleanOutput" /></label>
-      </div><div class="buttons"><button id="scanSpikes">仅扫描</button><button id="cleanSpikes" class="primary">生成清洗版本并复审</button></div></section>
+      <section class="card panel" data-panel="spikes"><div class="section-title"><h2><em>02</em>毛刺扫描与清洗</h2><span>源数据只读；仅修复命中阈值的孤立单帧数值毛刺</span></div><div class="grid three">
+        <label class="wide">权威源数据集<input id="spikeSource" /><small>原始 LeRobot 数据，扫描和清洗都不会原地修改它。</small></label><label>并行进程<input id="spikeWorkers" type="number" value="32" /><small>按 episode 并行处理 Parquet。</small></label><label>逐维阈值 JSON<input id="thresholdsPath" /><small>必须按当前机器人 state/action 维度和单位配置。</small></label><label>报告 JSON<input id="spikeReport" /><small>逐点记录原值、前后邻居、修复值和维度。</small></label><label class="wide">清洗输出目录<input id="cleanOutput" /><small>新数据集目录；不能与源目录相同，也不能覆盖已有目录。</small></label>
+      </div><div class="info-grid"><article><b>检测对象</b><strong>state + action</strong><p>检查关节状态与动作命令，不处理视频亮度或图像噪声。</p></article><article><b>修复规则</b><strong>只修孤立点</strong><p>单帧同时满足跳变阈值与邻居一致性时，以前后帧均值替换。</p></article><article class="warning"><b>原始数据策略</b><strong>先验证，再归档</strong><p>清洗集全量解码审计通过后可独立使用；论文复现仍建议保留或冷备原始集与报告。</p></article></div><div class="buttons"><button id="scanSpikes">仅扫描</button><button id="cleanSpikes" class="primary">生成清洗版本并复审</button></div></section>
 
-      <section class="card panel" data-panel="normalize"><div class="section-title"><h2><em>03</em>OpenPI 归一化</h2><span>数据源由 Config 的 repo_id 决定，不由上一步目录自动猜测</span></div><div class="grid three">
-        <label class="wide">Config name（可输入已注册的自定义配置）<input id="normConfig" list="bpxConfigNames" /></label><label>DataLoader workers<input id="normWorkers" type="number" value="32" /></label>
-        <label class="wide">实际读取的 LeRobot 数据集<input id="normDatasetSource" readonly /></label><label>Repo ID<input id="normRepoId" readonly /></label>
-        <label class="wide">统计写入位置<input id="normStatsOutput" readonly /></label><label>训练加载位置<input id="normStatsLoaded" readonly /></label>
-      </div><div id="normBinding" class="binding">正在解析配置…</div><div id="normPurpose" class="config-note">—</div><button id="startNormalize" class="primary">计算归一化统计</button></section>
+      <section class="card panel" data-panel="normalize"><div class="section-title"><h2><em>03</em>OpenPI 归一化</h2><span>Config 是数据、模型契约与归一化资产的唯一来源</span></div><div class="grid three">
+        <label class="wide">Config name（可输入已注册的自定义配置）<input id="normConfig" list="bpxConfigNames" /><small>要更换数据集，请选择或新增指向目标 repo_id 的 OpenPI Config。</small></label><label>DataLoader workers<input id="normWorkers" type="number" value="32" /><small>32 是当前服务器已验证的高效设置。</small></label>
+        <label class="wide readonly-field">实际读取的 LeRobot 数据集 <span class="lock">CONFIG 锁定</span><input id="normDatasetSource" readonly /><small>= HF_LEROBOT_HOME + Config.data.repo_id，禁止在 UI 单独改写以免训练错数据。</small></label><label class="readonly-field">Repo ID <span class="lock">CONFIG 锁定</span><input id="normRepoId" readonly /><small>由训练配置注册，不是自动猜测目录。</small></label>
+        <label class="wide readonly-field">归一化统计写入位置 <span class="lock">自动解析</span><input id="normStatsOutput" readonly /><small>compute_norm_stats.py 写入的 norm_stats.json。</small></label><label class="readonly-field">训练加载位置 <span class="lock">自动解析</span><input id="normStatsLoaded" readonly /><small>训练时同一 Config 实际加载的文件。</small></label>
+      </div><div class="lineage-summary"><article><span>数据源</span><strong id="normDatasetState">正在检查…</strong></article><article><span>统计绑定</span><strong id="normStatsBinding">正在检查…</strong></article><article><span>统计文件</span><strong id="normStatsSize">尚未计算</strong></article></div><div id="normBinding" class="binding">正在解析配置…</div><div id="normPurpose" class="config-note">—</div><button id="startNormalize" class="primary">计算归一化统计</button></section>
 
       <section class="card panel" data-panel="export"><div class="section-title"><h2><em>04</em>派生格式导出</h2><span>LeRobot 保持权威源，不做覆盖</span></div><div class="grid three">
         <label class="wide">LeRobot 源目录<input id="exportSource" /></label><label class="wide">HDF5 输出目录<input id="exportOutput" /></label><label>并行 episode<input id="exportWorkers" type="number" value="4" /></label><label>压缩<select id="exportCompression"><option>gzip</option><option>lzf</option><option>none</option></select></label><label>gzip level<input id="compressionLevel" type="number" value="4" /></label>
@@ -51,7 +52,7 @@
 
       <section class="card panel" data-panel="train"><div class="section-title"><h2><em>05</em>OpenPI 训练</h2><span>关键参数全部显式记录</span></div><div class="grid four">
         <label class="wide">Config name<input id="trainConfig" list="bpxConfigNames" /></label><label class="wide">Experiment name<input id="expName" /></label><label>CUDA 设备<input id="cudaDevices" value="2,3" /></label><label>XLA 显存比例<input id="memoryFraction" value="0.96" /></label><label>Global batch<input id="batchSize" type="number" value="2" /></label><label>FSDP devices<input id="fsdpDevices" type="number" value="2" /></label><label>训练 steps<input id="trainSteps" type="number" value="200000" /></label><label>保存间隔<input id="saveInterval" type="number" value="5000" /></label><label>长期保留间隔<input id="keepPeriod" type="number" value="25000" /></label><label>模式<select id="trainMode"><option value="overwrite">新实验 / overwrite</option><option value="resume">断点续训 / resume</option></select></label>
-        <label class="wide">训练实际读取的数据集<input id="trainDatasetSource" readonly /></label><label class="wide">训练加载的归一化统计<input id="trainStatsSource" readonly /></label>
+        <label class="wide readonly-field">训练实际读取的数据集 <span class="lock">CONFIG 锁定</span><input id="trainDatasetSource" readonly /><small>必须与本次归一化所读取的数据集一致。</small></label><label class="wide readonly-field">训练加载的归一化统计 <span class="lock">CONFIG 锁定</span><input id="trainStatsSource" readonly /><small>只是小型统计 JSON，不包含图像或 episode 数据。</small></label>
       </div><div id="trainPurpose" class="config-note">—</div><button id="startTrain" class="primary">启动训练</button></section>
 
       <section class="card panel" data-panel="serve"><div class="section-title"><h2><em>06</em>Checkpoint 推理服务</h2><span>自动扫描完整 checkpoint，默认监听 8000</span></div><div class="grid three">

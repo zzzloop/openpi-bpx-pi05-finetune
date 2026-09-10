@@ -1,0 +1,134 @@
+/* Data-lineage guidance and high-density research controls. */
+label {
+  position: relative;
+}
+
+label small {
+  min-height: 30px;
+  color: #7a8ba2;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+input,
+select {
+  border-radius: 10px;
+}
+
+input:hover,
+select:hover {
+  border-color: #9fb5d2;
+}
+
+input[readonly] {
+  background: linear-gradient(135deg, #f2f6fb, #edf3f9);
+  border-style: dashed;
+}
+
+.lock {
+  position: absolute;
+  right: 9px;
+  top: -3px;
+  padding: 3px 7px;
+  border: 1px solid #d5e0ed;
+  border-radius: 99px;
+  background: #edf3fa;
+  color: #547093;
+  font: 700 9px ui-monospace, monospace;
+  letter-spacing: 0.04em;
+}
+
+.readonly-field {
+  padding: 12px;
+  border: 1px solid #e1e9f3;
+  border-radius: 13px;
+  background: #f9fbfe;
+}
+
+.mode-guide,
+.info-grid,
+.lineage-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.mode-guide article,
+.info-grid article,
+.lineage-summary article {
+  padding: 15px;
+  border: 1px solid #dce6f2;
+  border-radius: 13px;
+  background: linear-gradient(145deg, #fbfdff, #f4f8fd);
+  transition: 0.18s;
+}
+
+.mode-guide article.active {
+  border-color: #7da0ff;
+  background: #eef4ff;
+  box-shadow: 0 0 0 3px #2457e610;
+}
+
+.mode-guide b,
+.info-grid b {
+  display: block;
+  color: var(--blue);
+  font: 800 9px ui-monospace, monospace;
+  letter-spacing: 0.12em;
+}
+
+.mode-guide strong,
+.info-grid strong {
+  display: block;
+  margin: 7px 0 5px;
+  font-size: 13px;
+}
+
+.mode-guide span,
+.info-grid p {
+  margin: 0;
+  color: #6f8097;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.info-grid article.warning {
+  border-color: #f0ddba;
+  background: #fffaf0;
+}
+
+.info-grid article.warning b {
+  color: var(--warning);
+}
+
+.lineage-summary article {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.lineage-summary span {
+  color: #7a8ba2;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+}
+
+.lineage-summary strong {
+  font-size: 13px;
+}
+
+.ok-text { color: var(--success); }
+.warn-text { color: var(--warning); }
+.bad-text { color: var(--danger); }
+.muted-text { color: #687a92; }
+
+@media (max-width: 1100px) {
+  .mode-guide,
+  .info-grid,
+  .lineage-summary {
+    grid-template-columns: 1fr;
+  }
+}

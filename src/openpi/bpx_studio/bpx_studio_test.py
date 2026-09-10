@@ -67,6 +67,20 @@ def test_config_profile_exposes_actual_dataset_and_norm_asset_binding(tmp_path: 
     assert profile["dataset_path"] == str((tmp_path / "lerobot/bpx/bpx_blocks_multitask_v2").resolve())
     assert profile["stats_paths_match"] is True
     assert profile["computed_stats_path"] == profile["loaded_stats_path"]
+    assert profile["computed_stats_exists"] is False
+    assert profile["stats_size_bytes"] == 0
+
+    stats_path = pathlib.Path(str(profile["computed_stats_path"]))
+    stats_path.parent.mkdir(parents=True)
+    stats_path.write_text('{"norm_stats": true}\n', encoding="utf-8")
+    with_stats = _config_profile(
+        project_root=tmp_path / "openpi",
+        lerobot_root=tmp_path / "lerobot",
+        train_config=train_config,
+    )
+    assert with_stats["computed_stats_exists"] is True
+    assert with_stats["loaded_stats_exists"] is True
+    assert with_stats["stats_size_bytes"] == stats_path.stat().st_size
 
     train_config.data.assets.assets_dir = "./assets/shared"
     mismatched = _config_profile(
