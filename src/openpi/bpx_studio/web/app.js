@@ -2,11 +2,11 @@ const $ = (id) => document.getElementById(id);
 const token = new URLSearchParams(location.search).get("token") || localStorage.getItem("bpx-token") || "";
 if (token) localStorage.setItem("bpx-token", token);
 
-const defaultsVersion = "3";
+const defaultsVersion = "4";
 const stored = [
   "openpiRoot", "hfLerobotHome", "checkpointRoot", "hfHome", "hfDatasetsCache", "tmpdir", "uvCacheDir",
   "auditDataset", "auditReport", "auditWorkers", "auditVideoCheck", "spikeSource", "spikeWorkers",
-  "thresholdsPath", "spikeReport", "cleanOutput", "normConfig", "normWorkers", "exportSource",
+  "thresholdsPath", "spikeScanReport", "spikeCleanReport", "cleanOutput", "normConfig", "normWorkers", "exportSource",
   "exportOutput", "exportWorkers", "exportCompression", "compressionLevel", "trainConfig", "expName",
   "cudaDevices", "memoryFraction", "batchSize", "fsdpDevices", "trainSteps", "saveInterval", "keepPeriod",
   "trainMode", "serveConfig", "serveCheckpoint", "serveCudaDevices", "serveMemoryFraction",
@@ -15,6 +15,11 @@ const stored = [
 let selectedJob = null;
 let checkpointRecords = [];
 let currentConfigProfile = null;
+let currentSpikeReport = null;
+let currentSpikeReportPath = "";
+let spikeReportOffset = 0;
+const spikePageSize = 100;
+let lastAutoLoadedSpikeJob = "";
 
 function value(id) {
   return $(id).value.trim();
@@ -77,6 +82,33 @@ function pathMatches(left, right) {
   return normalizedPath(left) === normalizedPath(right);
 }
 
+function confirmedSpikeIdentity() {
+  return localStorage.getItem("bpx-confirmed-spike-report") || "";
+}
+
+function cleanReviewMatchesDataset(datasetPath) {
+  return Boolean(
+    currentSpikeReport?.applied
+    && currentSpikeReport.clean_audit_passed
+    && pathMatches(currentSpikeReport.output || "", datasetPath)
+    && currentSpikeReport.report_identity === confirmedSpikeIdentity()
+  );
+}
+
+function renderNormalizationReviewState(datasetPath) {
+  const node = $("normReviewState");
+  if (!pathMatches(datasetPath, value("cleanOutput"))) {
+    node.textContent = "非当前清洗输出";
+    node.className = "warn-text";
+  } else if (cleanReviewMatchesDataset(datasetPath)) {
+    node.textContent = "已确认 · 报告未变化";
+    node.className = "ok-text";
+  } else {
+    node.textContent = "需查看并确认清洗报告";
+    node.className = "warn-text";
+  }
+}
+
 function setBinding(node, level, text) {
   node.className = `binding ${level}`;
   node.textContent = text;
@@ -100,6 +132,7 @@ function renderConfigProfile(profile) {
     ? `${human(profile.stats_size_bytes)} · 已生成`
     : "尚未生成 · 预计仅数 KB";
   $("normStatsSize").className = profile.computed_stats_exists ? "ok-text" : "muted-text";
+  renderNormalizationReviewState(profile.dataset_path);
 
   $("flowRaw").textContent = value("spikeSource") || "—";
   $("flowClean").textContent = value("cleanOutput") || "—";
@@ -152,6 +185,8 @@ function renderConfigError(error) {
   $("normStatsBinding").className = "bad-text";
   $("normStatsSize").textContent = "无法读取";
   $("normStatsSize").className = "muted-text";
+  $("normReviewState").textContent = "Config 解析失败";
+  $("normReviewState").className = "bad-text";
   setBinding($("normBinding"), "bad", "Config 必须先在 OpenPI 训练配置中注册，才能计算归一化统计或训练。");
   $("flowStatus").className = "flow-status bad";
   $("flowStatus").textContent = "Config 无法解析";
@@ -171,7 +206,7 @@ async function loadConfigProfile() {
   }
 }
 
-function confirmDataBinding(action) {
+async function confirmDataBinding(action) {
   if (!currentConfigProfile) return confirm(`当前 Config 尚未成功解析，仍要${action}吗？`);
   if (!currentConfigProfile.stats_paths_match) {
     toast("归一化写入与训练加载路径不一致，操作已阻止", true);
@@ -182,6 +217,27 @@ function confirmDataBinding(action) {
       `当前 Config 读取的是：\n${currentConfigProfile.dataset_path}\n\n` +
       `毛刺清洗输出是：\n${value("cleanOutput")}\n\n两者不同。确认仍要${action}？`,
     );
+  }
+  try {
+    const cleanReport = await fetchSpikeReport(value("spikeCleanReport"), 0, 1);
+    currentSpikeReport = cleanReport;
+    currentSpikeReportPath = value("spikeCleanReport");
+    renderNormalizationReviewState(currentConfigProfile.dataset_path);
+    if (!cleanReport.applied || !cleanReport.clean_audit_passed) {
+      toast("清洗报告尚未通过清洗后复审，操作已阻止", true);
+      return false;
+    }
+    if (!pathMatches(cleanReport.output || "", currentConfigProfile.dataset_path)) {
+      toast("已查看的清洗报告不属于 Config 实际读取的数据集", true);
+      return false;
+    }
+    if (cleanReport.report_identity !== confirmedSpikeIdentity()) {
+      toast("请先查看清洗报告并点击“确认清洗结果”", true);
+      return false;
+    }
+  } catch (error) {
+    toast(`无法验证清洗报告：${error.message}`, true);
+    return false;
   }
   return true;
 }
@@ -220,15 +276,158 @@ $("startAudit").onclick = () => start("/api/jobs/audit", {
 function spike(clean) {
   return start(clean ? "/api/jobs/spikes/clean" : "/api/jobs/spikes/scan", {
     source_root: value("spikeSource"), output_root: value("cleanOutput"), thresholds_path: value("thresholdsPath"),
-    report_path: value("spikeReport"), workers: num("spikeWorkers"),
+    report_path: value(clean ? "spikeCleanReport" : "spikeScanReport"), workers: num("spikeWorkers"),
   });
 }
 
 $("scanSpikes").onclick = () => spike(false);
 $("cleanSpikes").onclick = () => spike(true);
+
+async function fetchSpikeReport(path, offset = spikeReportOffset, limit = spikePageSize) {
+  const query = new URLSearchParams({
+    path,
+    offset: String(offset),
+    limit: String(limit),
+    feature: value("spikeFeatureFilter"),
+  });
+  const dimension = value("spikeDimensionFilter");
+  if (dimension !== "") query.set("dimension", dimension);
+  return api(`/api/spikes/report?${query}`);
+}
+
+function numeric(valueToFormat, digits = 6) {
+  const parsed = Number(valueToFormat);
+  return Number.isFinite(parsed) ? parsed.toFixed(digits) : "—";
+}
+
+function renderSpikeReport(report) {
+  currentSpikeReport = report;
+  $("spikeTotal").textContent = report.applied
+    ? `${report.total_repairs} 已修复`
+    : `${report.total_repairs} 个候选`;
+  $("spikeFiles").textContent = `${report.affected_files} / ${report.episode_files}`;
+  $("spikeFeatureCounts").textContent = `${report.by_feature["observation.state"] || 0} / ${report.by_feature.action || 0}`;
+  $("spikeAuditState").textContent = report.applied
+    ? (report.clean_audit_passed ? "PASS" : "未通过")
+    : "未清洗";
+  $("spikeAuditState").className = report.clean_audit_passed ? "ok-text" : (report.applied ? "bad-text" : "muted-text");
+  $("spikeReviewHint").textContent = report.applied
+    ? `清洗报告：${report.report_path}`
+    : `扫描报告：${report.report_path}`;
+  $("confirmSpikeReview").disabled = !(report.applied && report.clean_audit_passed);
+  $("confirmSpikeReview").textContent = report.report_identity === confirmedSpikeIdentity()
+    ? "✓ 已确认，允许归一化"
+    : "确认清洗结果，允许归一化";
+
+  const first = report.matched_repairs ? report.offset + 1 : 0;
+  const last = Math.min(report.offset + report.hits.length, report.matched_repairs);
+  $("spikePage").textContent = `${first}–${last} / ${report.matched_repairs}`;
+  $("spikePrev").disabled = report.offset === 0;
+  $("spikeNext").disabled = report.offset + report.limit >= report.matched_repairs;
+  $("spikeRows").innerHTML = report.hits.length
+    ? report.hits.map((hit, index) => `<tr data-file="${hit.file_index}" data-repair="${hit.repair_index}">
+        <td>${report.offset + index + 1}</td><td>${hit.episode_index ?? "—"}</td>
+        <td>${escapeHtml(hit.feature)} · ${hit.dimension} ${escapeHtml(hit.dimension_name)}</td>
+        <td>${hit.frame_index}</td><td>${numeric(hit.previous)}</td><td class="changed">${numeric(hit.original)}</td>
+        <td>${numeric(hit.following)}</td><td>${numeric(hit.repaired)}</td><td><button>查看 ± 帧</button></td>
+      </tr>`).join("")
+    : "<tr><td colspan='9'>当前筛选条件没有毛刺点</td></tr>";
+  document.querySelectorAll("#spikeRows tr[data-file]").forEach((row) => {
+    row.onclick = () => loadSpikeTrace(Number(row.dataset.file), Number(row.dataset.repair), row);
+  });
+  if (currentConfigProfile) renderNormalizationReviewState(currentConfigProfile.dataset_path);
+}
+
+async function loadSpikeReport(path, resetOffset = true) {
+  if (!path) return toast("毛刺报告路径为空", true);
+  if (resetOffset) spikeReportOffset = 0;
+  try {
+    currentSpikeReportPath = path;
+    renderSpikeReport(await fetchSpikeReport(path));
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function tracePath(frames, values, bounds) {
+  const { xmin, xmax, ymin, ymax } = bounds;
+  return frames.map((frame, index) => {
+    const x = 58 + 808 * (frame - xmin) / Math.max(1, xmax - xmin);
+    const y = 220 - 174 * (values[index] - ymin) / Math.max(1e-12, ymax - ymin);
+    return `${index ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+}
+
+function renderSpikeTrace(trace) {
+  $("traceLabel").textContent = `EPISODE ${trace.episode_index ?? "?"} · FRAME ${trace.center_frame}`;
+  $("traceTitle").textContent = `${trace.feature} · ${trace.dimension} ${trace.dimension_name}`;
+  const allValues = [...trace.source_values, ...trace.review_values].map(Number);
+  let ymin = Math.min(...allValues); let ymax = Math.max(...allValues);
+  if (ymin === ymax) { ymin -= 1; ymax += 1; }
+  const padding = (ymax - ymin) * 0.1;
+  ymin -= padding; ymax += padding;
+  const xmin = Math.min(...trace.frames); const xmax = Math.max(...trace.frames);
+  const bounds = { xmin, xmax, ymin, ymax };
+  const markerX = 58 + 808 * (trace.center_frame - xmin) / Math.max(1, xmax - xmin);
+  $("spikeTraceChart").innerHTML = `
+    <line x1="58" y1="220" x2="866" y2="220" stroke="#cad6e5"/>
+    <line x1="58" y1="46" x2="58" y2="220" stroke="#cad6e5"/>
+    <line x1="${markerX}" y1="38" x2="${markerX}" y2="220" stroke="#f0a24a" stroke-dasharray="6 5"/>
+    <path d="${tracePath(trace.frames, trace.source_values, bounds)}" fill="none" stroke="#d1435b" stroke-width="3"/>
+    <path d="${tracePath(trace.frames, trace.review_values, bounds)}" fill="none" stroke="#1678d4" stroke-width="3"/>
+    <text x="58" y="242" font-size="11" fill="#718096">frame ${xmin} → ${xmax}</text>
+    <text x="64" y="42" font-size="11" fill="#718096">${numeric(ymax, 4)}</text>
+    <text x="64" y="216" font-size="11" fill="#718096">${numeric(ymin, 4)}</text>
+    <text x="${Math.min(markerX + 6, 810)}" y="35" font-size="11" fill="#a56108">命中帧 ${trace.center_frame}</text>`;
+  $("traceRows").innerHTML = trace.frames.map((frame, index) => {
+    const changed = Math.abs(trace.source_values[index] - trace.review_values[index]) > 1e-10;
+    return `<tr class="${frame === trace.center_frame ? "selected" : ""}"><td>${frame}</td>
+      <td>${numeric(trace.timestamps[index], 4)}</td><td>${numeric(trace.source_values[index])}</td>
+      <td class="${changed ? "changed" : ""}">${numeric(trace.review_values[index])}</td><td>${changed ? numeric(trace.review_values[index] - trace.source_values[index]) : "—"}</td></tr>`;
+  }).join("");
+  $("traceVectorRows").innerHTML = trace.frame_vector.map((item) => {
+    const changed = Math.abs(item.source - item.cleaned) > 1e-10;
+    return `<tr><td>${item.dimension} · ${escapeHtml(item.name)}</td><td>${numeric(item.source)}</td><td class="${changed ? "changed" : ""}">${numeric(item.cleaned)}</td></tr>`;
+  }).join("");
+}
+
+async function loadSpikeTrace(fileIndex, repairIndex, row) {
+  try {
+    const query = new URLSearchParams({
+      report_path: currentSpikeReportPath,
+      file_index: String(fileIndex),
+      repair_index: String(repairIndex),
+      radius: String(num("spikeTraceRadius")),
+    });
+    renderSpikeTrace(await api(`/api/spikes/trace?${query}`));
+    document.querySelectorAll("#spikeRows tr").forEach((node) => node.classList.remove("selected"));
+    row.classList.add("selected");
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+$("viewScanReport").onclick = () => loadSpikeReport(value("spikeScanReport"));
+$("viewCleanReport").onclick = () => loadSpikeReport(value("spikeCleanReport"));
+$("applySpikeFilter").onclick = () => loadSpikeReport(currentSpikeReportPath || value("spikeScanReport"));
+$("spikePrev").onclick = () => {
+  spikeReportOffset = Math.max(0, spikeReportOffset - spikePageSize);
+  loadSpikeReport(currentSpikeReportPath, false);
+};
+$("spikeNext").onclick = () => {
+  spikeReportOffset += spikePageSize;
+  loadSpikeReport(currentSpikeReportPath, false);
+};
+$("confirmSpikeReview").onclick = () => {
+  if (!currentSpikeReport?.applied || !currentSpikeReport.clean_audit_passed) return;
+  localStorage.setItem("bpx-confirmed-spike-report", currentSpikeReport.report_identity);
+  renderSpikeReport(currentSpikeReport);
+  toast("清洗结果已确认；报告发生变化时需要重新确认");
+};
+
 $("startNormalize").onclick = async () => {
   await loadConfigProfile();
-  if (!confirmDataBinding("计算归一化统计")) return;
+  if (!(await confirmDataBinding("计算归一化统计"))) return;
   start("/api/jobs/normalize", {
     ...dataEnvironment(), openpi_root: value("openpiRoot"), config_name: value("normConfig"),
     workers: num("normWorkers"),
@@ -240,7 +439,7 @@ $("startExport").onclick = () => start("/api/jobs/export/hdf5", {
 });
 $("startTrain").onclick = async () => {
   await loadConfigProfile();
-  if (!confirmDataBinding("启动训练")) return;
+  if (!(await confirmDataBinding("启动训练"))) return;
   start("/api/jobs/train", {
     ...dataEnvironment(), openpi_root: value("openpiRoot"), config_name: value("trainConfig"),
     exp_name: value("expName"), checkpoint_base_dir: value("checkpointRoot"), cuda_devices: value("cudaDevices"),
@@ -354,7 +553,18 @@ async function refreshJobs() {
     });
     if (selectedJob) {
       const job = jobs.find((candidate) => candidate.id === selectedJob);
-      if (job) await show(job);
+      if (job) {
+        await show(job);
+        if (job.status === "succeeded" && job.id !== lastAutoLoadedSpikeJob) {
+          if (job.kind === "spike_scan") {
+            lastAutoLoadedSpikeJob = job.id;
+            await loadSpikeReport(value("spikeScanReport"));
+          } else if (job.kind === "spike_clean") {
+            lastAutoLoadedSpikeJob = job.id;
+            await loadSpikeReport(value("spikeCleanReport"));
+          }
+        }
+      }
     }
   } catch (_error) { /* Connection status is handled by refreshSystem. */ }
 }
@@ -417,7 +627,7 @@ $("checkpointRoot").addEventListener("change", async () => {
 async function init() {
   renderAuditMode();
   if (localStorage.getItem("bpx-defaults-version") !== defaultsVersion) {
-    ["auditDataset", "auditReport", "spikeSource", "spikeReport", "cleanOutput", "exportSource", "exportOutput", "normConfig", "trainConfig", "serveConfig", "expName"]
+    ["auditDataset", "auditReport", "spikeSource", "spikeScanReport", "spikeCleanReport", "cleanOutput", "exportSource", "exportOutput", "normConfig", "trainConfig", "serveConfig", "expName"]
       .forEach((id) => localStorage.removeItem(`bpx-${id}`));
     localStorage.setItem("bpx-defaults-version", defaultsVersion);
   }
@@ -437,7 +647,8 @@ async function init() {
       auditDataset: config.raw_dataset,
       auditReport: config.audit_report,
       spikeSource: config.raw_dataset,
-      spikeReport: config.spike_report,
+      spikeScanReport: config.spike_scan_report,
+      spikeCleanReport: config.spike_clean_report,
       cleanOutput: config.clean_dataset,
       exportSource: config.clean_dataset,
       exportOutput: config.hdf5_export,

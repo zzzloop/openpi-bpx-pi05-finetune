@@ -38,6 +38,11 @@ def _clean_parquet(arguments: tuple[pathlib.Path, dict[str, dict[str, np.ndarray
     counts = {}
     repairs = []
     output = table
+    episode_index = None
+    if "episode_index" in table.column_names:
+        episode_values = np.asarray(table["episode_index"].combine_chunks().to_pylist(), dtype=np.int64)
+        if episode_values.size and np.unique(episode_values).size == 1:
+            episode_index = int(episode_values[0])
     for key, config in thresholds.items():
         column_index = output.schema.get_field_index(key)
         if column_index < 0:
@@ -74,7 +79,13 @@ def _clean_parquet(arguments: tuple[pathlib.Path, dict[str, dict[str, np.ndarray
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
-    return {"path": str(path), "counts": counts, "total": sum(counts.values()), "repairs": repairs}
+    return {
+        "path": str(path),
+        "episode_index": episode_index,
+        "counts": counts,
+        "total": sum(counts.values()),
+        "repairs": repairs,
+    }
 
 
 def _copy_hardlinked(source: pathlib.Path, output: pathlib.Path) -> None:
@@ -121,9 +132,12 @@ def main() -> None:
             results.append(result)
             print(f"SCANNED {index}/{len(jobs)}", flush=True)
     report = {
+        "report_version": 2,
         "source": str(source),
         "output": str(target) if args.apply else None,
         "applied": args.apply,
+        "thresholds": str(args.thresholds.resolve()),
+        "clean_audit_passed": False,
         "episode_files": len(results),
         "repairs": sum(result["total"] for result in results),
         "files": results,
@@ -131,7 +145,9 @@ def main() -> None:
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if args.apply:
-        audit_dataset(target, args.workers)
+        report["post_clean_audit"] = audit_dataset(target, args.workers)
+        report["clean_audit_passed"] = True
+        args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     summary = {key: value for key, value in report.items() if key != "files"}
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     print("SPIKE CLEAN AND AUDIT PASS" if args.apply else "SPIKE SCAN PASS")

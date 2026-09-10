@@ -87,13 +87,15 @@ ssh -L 8866:127.0.0.1:8866 kemove@训练服务器IP
 
 1. 将工控机采集仓库 `recordings/lerobot/bpx_v2_humanoid_raw` 中冻结的数据集同步到服务器对应的 `_raw` 目录。
 2. `headers` 审计会逐个核对 MP4 容器、尺寸和 FPS；正式冻结数据集前再执行一次 `full` 全帧解码。
-3. 先执行“仅扫描毛刺”，人工审核 JSON 报告。逐维阈值必须与当前机器人的 state/action 维度和单位匹配。
-4. 确认后再“生成清洗版本”。工具用硬链接快速复制，只有发生修复的 Parquet 会被原子替换；源数据集保持不变，并对输出重新审计。
-5. 需要兼容其他工具时再从清洗后的 LeRobot 导出 HDF5。导出目录不可已存在，结果附带 SHA-256 manifest。
-6. 归一化和训练始终共用同一个 Config。页面会读取该 Config 的 `repo_id`，明确展示实际 LeRobot 数据目录、归一化写入路径和训练加载路径，并检查它们是否与毛刺清洗输出贯通。
-7. 默认使用 32 workers 计算全部归一化统计。检查 `norm_stats.json` 后启动训练。两张 48 GiB GPU 的已验证基线为 CUDA `2,3`、显存比例 `0.96`、global batch `2`、FSDP `2`。
-8. Experiment name 会检查当前 config 的已有目录并从 `bpx_v2_humanoid_bs2_v001` 开始递增，防止覆盖已有实验；仍允许人工改名。
-9. “模型推理”会扫描 `/scratch/bpx_datasets/checkpoints` 下所有 config 和 experiment 中同时具有 `params/` 和 `assets/` 的完整 checkpoint，忽略 `.orbax-checkpoint-tmp-*`。列表完整显示 `Config / Experiment / Step`，选择后自动匹配推理 Config，再启动仓库原生 `serve_policy.py`。停止按钮会终止该推理任务。
+3. 先执行“扫描毛刺”。扫描报告与清洗报告分别保存，不会相互覆盖；逐维阈值必须与当前机器人的 state/action 维度和单位匹配。
+4. 点击“查看扫描报告”，在浏览器内按 feature/维度筛选命中点。每个命中点都能查看 episode、帧号、关节名、前后值、修复候选值、可调半径的前后帧曲线，以及命中帧全部数值维度。
+5. 确认候选合理后再“生成清洗版本”。工具用硬链接快速复制，只有发生修复的 Parquet 会被原子替换；源数据集保持不变，并对输出重新审计。
+6. 点击“查看清洗报告”复核清洗前后曲线。只有报告标记为已实际修复、清洗后数据审计通过，且操作者点击“确认清洗结果”后，页面才允许对该清洗数据集计算归一化；报告文件发生变化会自动要求重新确认。
+7. 需要兼容其他工具时再从清洗后的 LeRobot 导出 HDF5。导出目录不可已存在，结果附带 SHA-256 manifest。
+8. 归一化和训练始终共用同一个 Config。页面会读取该 Config 的 `repo_id`，明确展示实际 LeRobot 数据目录、归一化写入路径和训练加载路径，并检查它们是否与毛刺清洗输出贯通。
+9. 默认使用 32 workers 计算全部归一化统计。检查 `norm_stats.json` 后启动训练。两张 48 GiB GPU 的已验证基线为 CUDA `2,3`、显存比例 `0.96`、global batch `2`、FSDP `2`。
+10. Experiment name 会检查当前 config 的已有目录并从 `bpx_v2_humanoid_bs2_v001` 开始递增，防止覆盖已有实验；仍允许人工改名。
+11. “模型推理”会扫描 `/scratch/bpx_datasets/checkpoints` 下所有 config 和 experiment 中同时具有 `params/` 和 `assets/` 的完整 checkpoint，忽略 `.orbax-checkpoint-tmp-*`。列表完整显示 `Config / Experiment / Step`，选择后自动匹配推理 Config，再启动仓库原生 `serve_policy.py`。停止按钮会终止该推理任务。
 
 ## Config 与数据源的严格关系
 

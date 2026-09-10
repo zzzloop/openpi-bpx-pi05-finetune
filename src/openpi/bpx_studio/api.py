@@ -30,6 +30,8 @@ from openpi.bpx_studio.commands import build_policy_serve
 from openpi.bpx_studio.commands import build_spike_job
 from openpi.bpx_studio.commands import build_train
 from openpi.bpx_studio.jobs import JobManager
+from openpi.bpx_studio.spike_viewer import load_spike_trace
+from openpi.bpx_studio.spike_viewer import summarize_spike_report
 
 DEFAULT_DATA_ROOT = pathlib.Path("/scratch/bpx_datasets")
 DEFAULT_CONFIG_NAME = "pi05_bpx_full_low_mem_multitask_v2"
@@ -123,7 +125,8 @@ def default_paths(data_root: pathlib.Path) -> dict[str, str]:
         "raw_dataset": str(raw_dataset),
         "clean_dataset": str(clean_dataset),
         "audit_report": str(root / "reports" / f"{DEFAULT_DATASET_NAME}_audit.json"),
-        "spike_report": str(root / "reports" / f"{DEFAULT_DATASET_NAME}_spikes.json"),
+        "spike_scan_report": str(root / "reports" / f"{DEFAULT_DATASET_NAME}_spikes_scan.json"),
+        "spike_clean_report": str(root / "reports" / f"{DEFAULT_DATASET_NAME}_spikes_clean.json"),
         "hdf5_export": str(root / "exports" / f"{DEFAULT_DATASET_NAME}_hdf5"),
     }
 
@@ -180,7 +183,9 @@ def _config_profile(
         raise ValueError(f"Config '{train_config.name}' 没有可用的 LeRobot repo_id")
 
     dataset_path = (lerobot_root / pathlib.Path(repo_id)).resolve()
-    computed_stats_dir = _absolute_from_project(project_root, train_config.assets_base_dir) / train_config.name / repo_id
+    computed_stats_dir = (
+        _absolute_from_project(project_root, train_config.assets_base_dir) / train_config.name / repo_id
+    )
     assets = getattr(data_factory, "assets", None)
     configured_assets_dir = getattr(assets, "assets_dir", None) if assets is not None else None
     asset_id = (getattr(assets, "asset_id", None) if assets is not None else None) or repo_id
@@ -316,6 +321,42 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
         except OSError as error:
             disk = {"path": str(target), "error": str(error)}
         return {"disk": disk, "gpus": _gpu_snapshot()}
+
+    @app.get("/api/spikes/report", dependencies=[Depends(authenticate)])
+    async def spike_report(
+        path: str,
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=100, ge=1, le=500),
+        feature: str = "",
+        dimension: int | None = Query(default=None, ge=0),
+    ):
+        try:
+            return summarize_spike_report(
+                pathlib.Path(path), offset=offset, limit=limit, feature=feature, dimension=dimension
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/spikes/trace", dependencies=[Depends(authenticate)])
+    async def spike_trace(
+        report_path: str,
+        file_index: int = Query(ge=0),
+        repair_index: int = Query(ge=0),
+        radius: int = Query(default=12, ge=2, le=100),
+    ):
+        try:
+            return load_spike_trace(
+                pathlib.Path(report_path),
+                file_index=file_index,
+                repair_index=repair_index,
+                radius=radius,
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.get("/api/jobs", dependencies=[Depends(authenticate)])
     async def jobs():

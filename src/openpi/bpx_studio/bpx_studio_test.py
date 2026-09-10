@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pathlib
 from types import SimpleNamespace
 
@@ -14,6 +15,8 @@ from openpi.bpx_studio.api import create_app
 from openpi.bpx_studio.api import default_paths
 from openpi.bpx_studio.numeric_spikes import repair_isolated_spikes
 from openpi.bpx_studio.progress import parse_progress_line
+from openpi.bpx_studio.spike_viewer import load_spike_trace
+from openpi.bpx_studio.spike_viewer import summarize_spike_report
 
 
 def _openpi_root(tmp_path: pathlib.Path) -> pathlib.Path:
@@ -32,6 +35,8 @@ def test_default_paths_keep_large_artifacts_under_data_root(tmp_path: pathlib.Pa
     assert paths["state_root"] == str(tmp_path / "dashboard_state")
     assert pathlib.Path(paths["raw_dataset"]).parts[-3:] == ("lerobot", "bpx", "bpx_v2_humanoid_raw")
     assert pathlib.Path(paths["clean_dataset"]).parts[-3:] == ("lerobot", "bpx", "bpx_v2_humanoid")
+    assert paths["spike_scan_report"].endswith("bpx_v2_humanoid_spikes_scan.json")
+    assert paths["spike_clean_report"].endswith("bpx_v2_humanoid_spikes_clean.json")
     assert all(pathlib.Path(path).is_relative_to(tmp_path) for path in paths.values())
 
 
@@ -99,7 +104,15 @@ def test_dashboard_routes_and_control_token_are_created(tmp_path: pathlib.Path) 
         data_root=tmp_path / "scratch",
     )
     routes = {route.path for route in app.routes}
-    assert {"/", "/healthz", "/api/config-profile", "/api/jobs/train", "/api/jobs/normalize"} <= routes
+    assert {
+        "/",
+        "/healthz",
+        "/api/config-profile",
+        "/api/spikes/report",
+        "/api/spikes/trace",
+        "/api/jobs/train",
+        "/api/jobs/normalize",
+    } <= routes
     assert app.state.control_token
     assert (tmp_path / "state" / ".server-token").is_file()
 
@@ -193,6 +206,85 @@ def test_isolated_spike_uses_neighbor_mean_without_touching_other_frames() -> No
     assert result.count == 1
     np.testing.assert_allclose(result.repaired[2], [0.2, 1.2])
     np.testing.assert_array_equal(result.repaired[[0, 1, 3, 4]], source[[0, 1, 3, 4]])
+
+
+def test_spike_report_summary_and_trace_show_source_and_cleaned_values(tmp_path: pathlib.Path) -> None:
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    source_root = tmp_path / "raw"
+    output_root = tmp_path / "clean"
+    relative = pathlib.Path("data/chunk-000/episode_000000.parquet")
+    for root in (source_root, output_root):
+        (root / relative.parent).mkdir(parents=True)
+        (root / "meta").mkdir()
+        (root / "meta/info.json").write_text(
+            json.dumps(
+                {
+                    "features": {
+                        "observation.state": {"names": ["shoulder", "elbow"]},
+                        "action": {"names": ["shoulder", "elbow"]},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+    source_values = [[0.0, 1.0], [0.1, 1.1], [9.0, 1.2], [0.3, 1.3], [0.4, 1.4]]
+    cleaned_values = [[0.0, 1.0], [0.1, 1.1], [0.2, 1.2], [0.3, 1.3], [0.4, 1.4]]
+
+    def write_episode(root: pathlib.Path, values: list[list[float]]) -> None:
+        table = pa.table(
+            {
+                "observation.state": pa.array(values, type=pa.list_(pa.float32(), 2)),
+                "action": pa.array(values, type=pa.list_(pa.float32(), 2)),
+                "episode_index": pa.array([0] * 5, type=pa.int64()),
+                "frame_index": pa.array(range(5), type=pa.int64()),
+                "timestamp": pa.array([index / 30 for index in range(5)], type=pa.float64()),
+            }
+        )
+        pq.write_table(table, root / relative)
+
+    write_episode(source_root, source_values)
+    write_episode(output_root, cleaned_values)
+    report_path = tmp_path / "spikes_clean.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "source": str(source_root),
+                "output": str(output_root),
+                "applied": True,
+                "clean_audit_passed": True,
+                "episode_files": 1,
+                "repairs": 1,
+                "files": [
+                    {
+                        "path": str(output_root / relative),
+                        "episode_index": 0,
+                        "repairs": [
+                            {
+                                "feature": "observation.state",
+                                "frame_index": 2,
+                                "dimension": 0,
+                                "previous": 0.1,
+                                "original": 9.0,
+                                "following": 0.3,
+                                "repaired": 0.2,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    summary = summarize_spike_report(report_path)
+    assert summary["total_repairs"] == 1
+    assert summary["affected_files"] == 1
+    assert summary["hits"][0]["dimension_name"] == "shoulder"
+    assert summary["clean_audit_passed"] is True
+    trace = load_spike_trace(report_path, file_index=0, repair_index=0, radius=2)
+    assert trace["source_values"][2] == pytest.approx(9.0)
+    assert trace["review_values"][2] == pytest.approx(0.2)
+    assert trace["frame_vector"][0]["name"] == "shoulder"
 
 
 def test_progress_parser_reads_openpi_training_metrics() -> None:
