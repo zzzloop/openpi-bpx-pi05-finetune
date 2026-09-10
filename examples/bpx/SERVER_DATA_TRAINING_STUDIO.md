@@ -45,7 +45,7 @@ mkdir -p \
 uv sync --frozen
 ```
 
-上面的安装只需在首次部署或 `uv.lock` 更新后联网执行一次。FastAPI 和 Uvicorn 已固定在项目依赖与锁文件中，不再通过 `uv run --with` 临时下载。
+上面的 `uv sync` 是完整 OpenPI 环境的首次部署步骤。对于已经能够训练和推理的服务器，更新仪表盘版本后不需要再次运行它。BPX Studio 的小型纯 Python Web 运行时已随 Git 仓库放在 `third_party/bpx_studio_wheels/` 中，不依赖 PyPI 或 `uv` 缓存。
 
 ## 日常离线启动
 
@@ -54,7 +54,7 @@ cd ~/zzk_data/openpi-bpx-pi05-finetune
 bash scripts/start_bpx_studio.sh
 ```
 
-启动脚本直接使用项目自己的 `.venv/bin/python`，不会调用 `uv`、不会解析依赖、也不会访问 PyPI。依赖缺失时脚本会明确退出，不会在后台下载。需要修改监听地址或端口时再传参数：
+启动脚本直接使用项目自己的 `.venv/bin/python`，并从仓库内的 wheel 文件导入 FastAPI/Uvicorn；不会调用 `uv`、不会安装或解析依赖、也不会访问 PyPI。仓库文件缺失时脚本会明确退出，不会在后台下载。需要修改监听地址或端口时再传参数：
 
 ```bash
 bash scripts/start_bpx_studio.sh --host 127.0.0.1 --port 8866

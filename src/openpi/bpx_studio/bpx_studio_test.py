@@ -94,9 +94,13 @@ def test_studio_launcher_is_strictly_offline() -> None:
     project_root = pathlib.Path(__file__).resolve().parents[3]
     launcher = (project_root / "scripts" / "start_bpx_studio.sh").read_text(encoding="utf-8")
     assert '.venv/bin/python' in launcher
+    assert "third_party/bpx_studio_wheels" in launcher
+    assert 'export PYTHONPATH="${wheel_pythonpath}' in launcher
     assert 'exec "${PROJECT_PYTHON}" -m openpi.bpx_studio.api' in launcher
     assert "uv run" not in launcher
     assert "--with" not in launcher
+    wheels = list((project_root / "third_party" / "bpx_studio_wheels").glob("*.whl"))
+    assert len(wheels) == 9
 
 
 def test_train_command_preserves_known_two_gpu_contract(tmp_path: pathlib.Path) -> None:
