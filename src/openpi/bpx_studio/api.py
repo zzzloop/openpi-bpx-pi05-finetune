@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import logging
 import os
 import pathlib
@@ -33,6 +34,13 @@ from openpi.bpx_studio.jobs import JobManager
 DEFAULT_DATA_ROOT = pathlib.Path("/scratch/bpx_datasets")
 DEFAULT_CONFIG_NAME = "pi05_bpx_full_low_mem_multitask_v2"
 DEFAULT_DATASET_NAME = "bpx_v2_humanoid"
+BPX_CONFIG_PURPOSES = {
+    "pi05_bpx_full": "第一代 BPX 基线: bpx_blocks 数据集, 全参数微调, 默认显存需求较高。",
+    "pi05_bpx_full_low_mem": "第一代 BPX 低显存全参数版本: bpx_blocks 数据集, 适配两张 48 GiB GPU。",
+    "pi05_bpx_full_low_mem_combined": "第一代 BPX 合并数据版本: 原 59 条示教与新增多任务数据的全参数微调。",
+    "pi05_bpx_full_low_mem_multitask_v2": "第一代 BPX 多任务 v2: 裁减固定轨迹并按任务均衡采样的低显存全参数微调。",
+    "pi05_bpx_lora": "第一代 BPX LoRA 对照实验: bpx_blocks 数据集, 仅训练低秩适配参数。",
+}
 
 
 class DataEnvironment(BaseModel):
@@ -155,6 +163,49 @@ def _next_experiment(checkpoint_root: pathlib.Path, config_name: str) -> str:
     raise RuntimeError("无法生成新的实验编号")
 
 
+def _absolute_from_project(project_root: pathlib.Path, path: str | pathlib.Path) -> pathlib.Path:
+    candidate = pathlib.Path(path).expanduser()
+    return (candidate if candidate.is_absolute() else project_root / candidate).resolve()
+
+
+def _config_profile(
+    *,
+    project_root: pathlib.Path,
+    lerobot_root: pathlib.Path,
+    train_config,
+) -> dict[str, str | bool]:
+    data_factory = train_config.data
+    repo_id = getattr(data_factory, "repo_id", None)
+    if not isinstance(repo_id, str) or not repo_id or repo_id == "fake":
+        raise ValueError(f"Config '{train_config.name}' 没有可用的 LeRobot repo_id")
+
+    dataset_path = (lerobot_root / pathlib.Path(repo_id)).resolve()
+    computed_stats_dir = _absolute_from_project(project_root, train_config.assets_base_dir) / train_config.name / repo_id
+    assets = getattr(data_factory, "assets", None)
+    configured_assets_dir = getattr(assets, "assets_dir", None) if assets is not None else None
+    asset_id = (getattr(assets, "asset_id", None) if assets is not None else None) or repo_id
+    loaded_assets_root = (
+        _absolute_from_project(project_root, configured_assets_dir)
+        if configured_assets_dir
+        else _absolute_from_project(project_root, train_config.assets_base_dir) / train_config.name
+    )
+    loaded_stats_dir = (loaded_assets_root / asset_id).resolve()
+    purpose = BPX_CONFIG_PURPOSES.get(
+        train_config.name,
+        "自定义 OpenPI 配置; 请根据 repo_id、输入映射、动作维度和归一化资产人工复核用途。",
+    )
+    return {
+        "config_name": train_config.name,
+        "repo_id": repo_id,
+        "dataset_path": str(dataset_path),
+        "dataset_exists": dataset_path.is_dir(),
+        "computed_stats_path": str((computed_stats_dir / "norm_stats.json").resolve()),
+        "loaded_stats_path": str((loaded_stats_dir / "norm_stats.json").resolve()),
+        "stats_paths_match": computed_stats_dir.resolve() == loaded_stats_dir,
+        "purpose": purpose,
+    }
+
+
 def _load_or_create_token(state_dir: pathlib.Path) -> str:
     path = state_dir / ".server-token"
     if path.is_file() and (token := path.read_text(encoding="utf-8").strip()):
@@ -225,9 +276,20 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
             "default_openpi_root": str(project_root),
             "default_workers": 32,
             "default_config_name": DEFAULT_CONFIG_NAME,
+            "known_config_names": list(BPX_CONFIG_PURPOSES),
             "default_experiment_name": _next_experiment(checkpoint_root, DEFAULT_CONFIG_NAME),
             **default_paths(data_root),
         }
+
+    @app.get("/api/config-profile", dependencies=[Depends(authenticate)])
+    async def config_profile(config_name: str = DEFAULT_CONFIG_NAME, hf_lerobot_home: str = ""):
+        try:
+            training_config = importlib.import_module("openpi.training.config")
+            selected = training_config.get_config(config_name)
+            lerobot_root = pathlib.Path(hf_lerobot_home or data_root / "lerobot").expanduser().resolve()
+            return _config_profile(project_root=project_root, lerobot_root=lerobot_root, train_config=selected)
+        except (ImportError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.get("/api/checkpoints", dependencies=[Depends(authenticate)])
     async def checkpoints():

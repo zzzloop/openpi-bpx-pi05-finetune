@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import pathlib
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from openpi.bpx_studio import commands
 from openpi.bpx_studio.api import _checkpoints
+from openpi.bpx_studio.api import _config_profile
 from openpi.bpx_studio.api import _next_experiment
 from openpi.bpx_studio.api import create_app
 from openpi.bpx_studio.api import default_paths
@@ -48,6 +50,34 @@ def test_checkpoint_discovery_ignores_incomplete_saves_and_increments_experiment
     assert _next_experiment(tmp_path, "config") == "bpx_v2_humanoid_bs2_v003"
 
 
+def test_config_profile_exposes_actual_dataset_and_norm_asset_binding(tmp_path: pathlib.Path) -> None:
+    train_config = SimpleNamespace(
+        name="pi05_bpx_full_low_mem_multitask_v2",
+        assets_base_dir="./assets",
+        data=SimpleNamespace(
+            repo_id="bpx/bpx_blocks_multitask_v2",
+            assets=SimpleNamespace(assets_dir=None, asset_id="bpx/bpx_blocks_multitask_v2"),
+        ),
+    )
+    profile = _config_profile(
+        project_root=tmp_path / "openpi",
+        lerobot_root=tmp_path / "lerobot",
+        train_config=train_config,
+    )
+    assert profile["dataset_path"] == str((tmp_path / "lerobot/bpx/bpx_blocks_multitask_v2").resolve())
+    assert profile["stats_paths_match"] is True
+    assert profile["computed_stats_path"] == profile["loaded_stats_path"]
+
+    train_config.data.assets.assets_dir = "./assets/shared"
+    mismatched = _config_profile(
+        project_root=tmp_path / "openpi",
+        lerobot_root=tmp_path / "lerobot",
+        train_config=train_config,
+    )
+    assert mismatched["stats_paths_match"] is False
+    assert mismatched["computed_stats_path"] != mismatched["loaded_stats_path"]
+
+
 def test_dashboard_routes_and_control_token_are_created(tmp_path: pathlib.Path) -> None:
     app = create_app(
         state_dir=tmp_path / "state",
@@ -55,7 +85,7 @@ def test_dashboard_routes_and_control_token_are_created(tmp_path: pathlib.Path) 
         data_root=tmp_path / "scratch",
     )
     routes = {route.path for route in app.routes}
-    assert {"/", "/healthz", "/api/jobs/train", "/api/jobs/normalize"} <= routes
+    assert {"/", "/healthz", "/api/config-profile", "/api/jobs/train", "/api/jobs/normalize"} <= routes
     assert app.state.control_token
     assert (tmp_path / "state" / ".server-token").is_file()
 

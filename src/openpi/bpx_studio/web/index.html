@@ -7,10 +7,10 @@
     <link rel="stylesheet" href="/static/app.css" />
   </head>
   <body>
-    <header><div class="logo">π</div><div><small>OPENPI · BPX LAB</small><h1>Research Data Studio</h1></div><span id="connection" class="pill">连接中</span></header>
+    <header><div class="logo">π</div><div><small>OPENPI · BPX LAB</small><h1>Research Data Studio</h1></div><span class="version">SERVER PIPELINE</span><span id="connection" class="pill">连接中</span></header>
     <main>
       <section class="hero">
-        <div><b>DATA → POLICY</b><h2>可复现的数据工程与训练控制台</h2><p>审计、毛刺清洗、归一化、派生格式和训练任务，统一记录命令、日志、进度与指标。</p></div>
+        <div><b>DATA → POLICY</b><h2>可复现的数据工程与训练控制台</h2><p>让每一步都能回答三个问题：输入来自哪里、产生什么输出、下一步是否真正使用了它。</p></div>
         <aside><div class="title"><h3>服务器状态</h3><button id="refreshSystem">刷新</button></div><div id="gpuGrid">等待 GPU 信息…</div><div class="disk"><span>数据盘</span><strong id="diskUsage">—</strong></div><progress id="diskMeter" max="100" value="0"></progress></aside>
       </section>
 
@@ -18,6 +18,16 @@
         <label>OpenPI 根目录<input id="openpiRoot" /></label><label>LeRobot 数据根目录<input id="hfLerobotHome" /></label><label>Checkpoint 根目录<input id="checkpointRoot" /></label>
         <label>Hugging Face 缓存<input id="hfHome" /></label><label>Datasets 缓存<input id="hfDatasetsCache" /></label><label>临时目录<input id="tmpdir" /></label><label>uv 缓存<input id="uvCacheDir" /></label>
       </div></section>
+
+      <section class="card pipeline-card"><div class="section-title"><h2><em>FLOW</em>当前数据链</h2><span id="flowStatus" class="flow-status">正在解析 Config…</span></div>
+        <div class="pipeline">
+          <div><small>01 RAW</small><strong>采集原始集</strong><code id="flowRaw">—</code></div><i>→</i>
+          <div><small>02 CLEAN</small><strong>毛刺清洗集</strong><code id="flowClean">—</code></div><i>→</i>
+          <div><small>03 CONFIG</small><strong>训练实际读取</strong><code id="flowConfigDataset">—</code></div><i>→</i>
+          <div><small>04 STATS</small><strong>归一化资产</strong><code id="flowStats">—</code></div><i>→</i>
+          <div><small>05 MODEL</small><strong>Checkpoint</strong><code id="flowCheckpoint">—</code></div>
+        </div>
+      </section>
 
       <nav><button class="active" data-tab="audit">01 数据审计</button><button data-tab="spikes">02 毛刺清洗</button><button data-tab="normalize">03 归一化</button><button data-tab="export">04 格式导出</button><button data-tab="train">05 模型训练</button><button data-tab="serve">06 模型推理</button></nav>
 
@@ -29,21 +39,26 @@
         <label class="wide">权威源数据集<input id="spikeSource" /></label><label>并行进程<input id="spikeWorkers" type="number" value="32" /></label><label>逐维阈值 JSON<input id="thresholdsPath" /></label><label>报告 JSON<input id="spikeReport" /></label><label class="wide">清洗输出目录<input id="cleanOutput" /></label>
       </div><div class="buttons"><button id="scanSpikes">仅扫描</button><button id="cleanSpikes" class="primary">生成清洗版本并复审</button></div></section>
 
-      <section class="card panel" data-panel="normalize"><div class="section-title"><h2><em>03</em>OpenPI 归一化</h2><span>32 workers；处理全部数据，不抽样</span></div><div class="grid three"><label class="wide">Config name<input id="normConfig" /></label><label>DataLoader workers<input id="normWorkers" type="number" value="32" /></label></div><button id="startNormalize" class="primary">计算归一化统计</button></section>
+      <section class="card panel" data-panel="normalize"><div class="section-title"><h2><em>03</em>OpenPI 归一化</h2><span>数据源由 Config 的 repo_id 决定，不由上一步目录自动猜测</span></div><div class="grid three">
+        <label class="wide">Config name（可输入已注册的自定义配置）<input id="normConfig" list="bpxConfigNames" /></label><label>DataLoader workers<input id="normWorkers" type="number" value="32" /></label>
+        <label class="wide">实际读取的 LeRobot 数据集<input id="normDatasetSource" readonly /></label><label>Repo ID<input id="normRepoId" readonly /></label>
+        <label class="wide">统计写入位置<input id="normStatsOutput" readonly /></label><label>训练加载位置<input id="normStatsLoaded" readonly /></label>
+      </div><div id="normBinding" class="binding">正在解析配置…</div><div id="normPurpose" class="config-note">—</div><button id="startNormalize" class="primary">计算归一化统计</button></section>
 
       <section class="card panel" data-panel="export"><div class="section-title"><h2><em>04</em>派生格式导出</h2><span>LeRobot 保持权威源，不做覆盖</span></div><div class="grid three">
         <label class="wide">LeRobot 源目录<input id="exportSource" /></label><label class="wide">HDF5 输出目录<input id="exportOutput" /></label><label>并行 episode<input id="exportWorkers" type="number" value="4" /></label><label>压缩<select id="exportCompression"><option>gzip</option><option>lzf</option><option>none</option></select></label><label>gzip level<input id="compressionLevel" type="number" value="4" /></label>
       </div><button id="startExport" class="primary">导出 HDF5</button></section>
 
       <section class="card panel" data-panel="train"><div class="section-title"><h2><em>05</em>OpenPI 训练</h2><span>关键参数全部显式记录</span></div><div class="grid four">
-        <label class="wide">Config name<input id="trainConfig" /></label><label class="wide">Experiment name<input id="expName" /></label><label>CUDA 设备<input id="cudaDevices" value="2,3" /></label><label>XLA 显存比例<input id="memoryFraction" value="0.96" /></label><label>Global batch<input id="batchSize" type="number" value="2" /></label><label>FSDP devices<input id="fsdpDevices" type="number" value="2" /></label><label>训练 steps<input id="trainSteps" type="number" value="200000" /></label><label>保存间隔<input id="saveInterval" type="number" value="5000" /></label><label>长期保留间隔<input id="keepPeriod" type="number" value="25000" /></label><label>模式<select id="trainMode"><option value="overwrite">新实验 / overwrite</option><option value="resume">断点续训 / resume</option></select></label>
-      </div><button id="startTrain" class="primary">启动训练</button></section>
+        <label class="wide">Config name<input id="trainConfig" list="bpxConfigNames" /></label><label class="wide">Experiment name<input id="expName" /></label><label>CUDA 设备<input id="cudaDevices" value="2,3" /></label><label>XLA 显存比例<input id="memoryFraction" value="0.96" /></label><label>Global batch<input id="batchSize" type="number" value="2" /></label><label>FSDP devices<input id="fsdpDevices" type="number" value="2" /></label><label>训练 steps<input id="trainSteps" type="number" value="200000" /></label><label>保存间隔<input id="saveInterval" type="number" value="5000" /></label><label>长期保留间隔<input id="keepPeriod" type="number" value="25000" /></label><label>模式<select id="trainMode"><option value="overwrite">新实验 / overwrite</option><option value="resume">断点续训 / resume</option></select></label>
+        <label class="wide">训练实际读取的数据集<input id="trainDatasetSource" readonly /></label><label class="wide">训练加载的归一化统计<input id="trainStatsSource" readonly /></label>
+      </div><div id="trainPurpose" class="config-note">—</div><button id="startTrain" class="primary">启动训练</button></section>
 
       <section class="card panel" data-panel="serve"><div class="section-title"><h2><em>06</em>Checkpoint 推理服务</h2><span>自动扫描完整 checkpoint，默认监听 8000</span></div><div class="grid three">
         <label class="wide">Config name（由 checkpoint 自动匹配）<input id="serveConfig" readonly /></label><label class="wide">全部完整 checkpoint<select id="serveCheckpoint"><option value="">正在扫描…</option></select></label><label>CUDA 设备<input id="serveCudaDevices" value="2,3" /></label><label>XLA 显存比例<input id="serveMemoryFraction" value="0.96" /></label>
       </div><div class="buttons"><button id="startServe" class="primary">启动模型推理</button><button id="stopServe" class="danger">停止模型推理</button></div></section>
 
       <section class="monitor"><article class="card jobs"><div class="title"><h2>任务记录</h2><button id="refreshJobs">刷新</button></div><div id="jobList">暂无任务</div></article><article class="card details"><div class="title"><div><small id="selectedKind">NO JOB</small><h2 id="selectedTitle">选择任务查看详情</h2></div><button id="cancelJob" class="danger" hidden>终止任务</button></div><div class="progress-line"><span id="progressText">0 / 0</span><strong id="progressPercent">0%</strong></div><progress id="progressBar" max="100" value="0"></progress><div class="metrics"><div>LOSS<strong id="metricLoss">—</strong></div><div>GRAD NORM<strong id="metricGrad">—</strong></div><div>LEARNING RATE<strong id="metricLr">—</strong></div><div>STATUS<strong id="metricStatus">—</strong></div></div><div class="charts"><svg id="lossChart" viewBox="0 0 600 170"></svg><svg id="normChart" viewBox="0 0 600 170"></svg></div><details><summary>受控命令与环境</summary><pre id="commandText">—</pre></details><pre id="jobLog" class="log">任务日志将在这里显示。</pre></article></section>
-    </main><div id="toast"></div><script src="/static/app.js"></script>
+    </main><datalist id="bpxConfigNames"></datalist><div id="toast"></div><script src="/static/app.js"></script>
   </body>
 </html>

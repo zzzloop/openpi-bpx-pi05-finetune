@@ -79,10 +79,22 @@ ssh -L 8866:127.0.0.1:8866 kemove@训练服务器IP
 3. 先执行“仅扫描毛刺”，人工审核 JSON 报告。逐维阈值必须与当前机器人的 state/action 维度和单位匹配。
 4. 确认后再“生成清洗版本”。工具用硬链接快速复制，只有发生修复的 Parquet 会被原子替换；源数据集保持不变，并对输出重新审计。
 5. 需要兼容其他工具时再从清洗后的 LeRobot 导出 HDF5。导出目录不可已存在，结果附带 SHA-256 manifest。
-6. 归一化和训练默认共用 `pi05_bpx_full_low_mem_multitask_v2`。这是当前已有模型的可运行默认值；二代机器人 OpenPI config 完成后，应统一换成二代 config 名，不能混用旧机器人的特征契约和归一化统计。
+6. 归一化和训练始终共用同一个 Config。页面会读取该 Config 的 `repo_id`，明确展示实际 LeRobot 数据目录、归一化写入路径和训练加载路径，并检查它们是否与毛刺清洗输出贯通。
 7. 默认使用 32 workers 计算全部归一化统计。检查 `norm_stats.json` 后启动训练。两张 48 GiB GPU 的已验证基线为 CUDA `2,3`、显存比例 `0.96`、global batch `2`、FSDP `2`。
 8. Experiment name 会检查当前 config 的已有目录并从 `bpx_v2_humanoid_bs2_v001` 开始递增，防止覆盖已有实验；仍允许人工改名。
 9. “模型推理”会扫描 `/scratch/bpx_datasets/checkpoints` 下所有 config 和 experiment 中同时具有 `params/` 和 `assets/` 的完整 checkpoint，忽略 `.orbax-checkpoint-tmp-*`。列表完整显示 `Config / Experiment / Step`，选择后自动匹配推理 Config，再启动仓库原生 `serve_policy.py`。停止按钮会终止该推理任务。
+
+## Config 与数据源的严格关系
+
+`scripts/compute_norm_stats.py` 不接受任意数据集目录。它只接受 `--config-name`，再从该 OpenPI Config 的 `data.repo_id` 解析数据源：
+
+```text
+HF_LEROBOT_HOME/<repo_id>
+```
+
+训练也通过同一个 Config 读取同一 `repo_id`，并加载该配置指定的 `norm_stats.json`。因此“清洗输出目录”和“Config 实际数据集”相同，才表示数据链真正贯通。控制台会显示绿色、黄色或红色状态，并在不一致时要求二次确认；归一化统计写入路径与训练加载路径不一致时则直接阻止操作。
+
+当前默认 `pi05_bpx_full_low_mem_multitask_v2` 是**第一代机器人已有模型的兼容入口**，实际读取 `bpx/bpx_blocks_multitask_v2`，并不等于尚未定型的二代清洗目录 `bpx/bpx_v2_humanoid`。在二代机器人的关节顺序、动作维度、相机键和末端执行器契约确定前，不能安全地伪造一个二代 Config。契约完成后必须新增二代专用 Config，使其 `repo_id` 指向 `bpx/bpx_v2_humanoid`，届时页面会自动显示全链路贯通。
 
 ## 毛刺阈值文件
 
