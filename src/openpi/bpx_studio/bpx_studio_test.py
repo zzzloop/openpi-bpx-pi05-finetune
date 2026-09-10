@@ -90,6 +90,15 @@ def test_dashboard_routes_and_control_token_are_created(tmp_path: pathlib.Path) 
     assert (tmp_path / "state" / ".server-token").is_file()
 
 
+def test_studio_launcher_is_strictly_offline() -> None:
+    project_root = pathlib.Path(__file__).resolve().parents[3]
+    launcher = (project_root / "scripts" / "start_bpx_studio.sh").read_text(encoding="utf-8")
+    assert '.venv/bin/python' in launcher
+    assert 'exec "${PROJECT_PYTHON}" -m openpi.bpx_studio.api' in launcher
+    assert "uv run" not in launcher
+    assert "--with" not in launcher
+
+
 def test_train_command_preserves_known_two_gpu_contract(tmp_path: pathlib.Path) -> None:
     root = _openpi_root(tmp_path / "openpi")
     checkpoint_root = tmp_path / "scratch" / "checkpoints"

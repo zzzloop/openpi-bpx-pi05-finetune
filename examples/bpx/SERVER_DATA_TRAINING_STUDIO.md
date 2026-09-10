@@ -42,11 +42,22 @@ mkdir -p \
   /scratch/bpx_datasets/tmp \
   /scratch/bpx_datasets/dashboard_state
 
-uv sync
-uv run --with 'fastapi>=0.115' --with 'uvicorn>=0.34' \
-  python -m openpi.bpx_studio.api \
-  --host 127.0.0.1 \
-  --port 8866
+uv sync --frozen
+```
+
+上面的安装只需在首次部署或 `uv.lock` 更新后联网执行一次。FastAPI 和 Uvicorn 已固定在项目依赖与锁文件中，不再通过 `uv run --with` 临时下载。
+
+## 日常离线启动
+
+```bash
+cd ~/zzk_data/openpi-bpx-pi05-finetune
+bash scripts/start_bpx_studio.sh
+```
+
+启动脚本直接使用项目自己的 `.venv/bin/python`，不会调用 `uv`、不会解析依赖、也不会访问 PyPI。依赖缺失时脚本会明确退出，不会在后台下载。需要修改监听地址或端口时再传参数：
+
+```bash
+bash scripts/start_bpx_studio.sh --host 127.0.0.1 --port 8866
 ```
 
 `/scratch/bpx_datasets` 已经是程序内置默认值，因此日常启动不需要重复 `export BPX_DATA_ROOT`，也不需要传 `--data-root`；只有迁移数据盘时才使用这两个覆盖入口。
