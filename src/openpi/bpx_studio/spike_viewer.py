@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 import importlib
+import itertools
 import json
 import pathlib
 from typing import Any
@@ -127,6 +128,12 @@ def summarize_spike_report(
         "output": report.get("output"),
         "applied": bool(report.get("applied")),
         "clean_audit_passed": bool(report.get("clean_audit_passed")),
+        "unresolved_jumps": report.get("unresolved_jumps"),
+        "unresolved_examples": list(itertools.islice((
+            {**hit, "episode_index": record.get("episode_index"), "path": record.get("path")}
+            for record in report["files"]
+            for hit in record.get("unresolved_jumps", [])
+        ), 100)),
         "total_repairs": int(report.get("repairs", sum(by_feature.values()))),
         "matched_repairs": matched,
         "affected_files": affected_files,

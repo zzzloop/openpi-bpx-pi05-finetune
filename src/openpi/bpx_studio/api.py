@@ -1,20 +1,18 @@
-"""Authenticated local dashboard for BPX data engineering and OpenPI training."""
+"""LAN dashboard for BPX data engineering and OpenPI training."""
 
 from __future__ import annotations
 
 import argparse
+import csv
 import importlib
 import logging
 import os
 import pathlib
-import secrets
 import shutil
 import subprocess
 from typing import Literal
 
-from fastapi import Depends
 from fastapi import FastAPI
-from fastapi import Header
 from fastapi import HTTPException
 from fastapi import Query
 from fastapi.responses import FileResponse
@@ -109,7 +107,7 @@ def default_paths(data_root: pathlib.Path) -> dict[str, str]:
     root = data_root.expanduser().resolve()
     lerobot_root = root / "lerobot"
     raw_dataset = lerobot_root / "bpx" / f"{DEFAULT_DATASET_NAME}_raw"
-    clean_dataset = lerobot_root / "bpx" / DEFAULT_DATASET_NAME
+    clean_dataset = lerobot_root / "bpx" / "bpx_blocks_multitask_v2"
     return {
         "data_root": str(root),
         "hf_lerobot_home": str(root / "lerobot"),
@@ -216,19 +214,7 @@ def _config_profile(
     }
 
 
-def _load_or_create_token(state_dir: pathlib.Path) -> str:
-    path = state_dir / ".server-token"
-    if path.is_file() and (token := path.read_text(encoding="utf-8").strip()):
-        return token
-    state_dir.mkdir(parents=True, exist_ok=True)
-    token = secrets.token_urlsafe(24)
-    path.write_text(token + "\n", encoding="utf-8")
-    if os.name == "posix":
-        path.chmod(0o600)
-    return token
-
-
-def _gpu_snapshot() -> list[dict[str, str]]:
+def _gpu_snapshot() -> dict:
     try:
         result = subprocess.run(
             [
@@ -239,29 +225,31 @@ def _gpu_snapshot() -> list[dict[str, str]]:
             check=True,
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=8,
+            encoding="utf-8",
+            errors="replace",
         )
-    except (OSError, subprocess.SubprocessError):
-        return []
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"gpus": [], "gpu_error": f"nvidia-smi 查询失败: {error}"}
     fields = ("index", "name", "memory_used_mib", "memory_total_mib", "utilization_percent", "temperature_c")
-    return [
-        dict(zip(fields, (part.strip() for part in line.split(",")), strict=True))
-        for line in result.stdout.splitlines()
-    ]
+    gpus = []
+    malformed = False
+    for row in csv.reader(result.stdout.splitlines(), skipinitialspace=True):
+        if not row:
+            continue
+        if len(row) != len(fields):
+            malformed = True
+            continue
+        gpus.append(dict(zip(fields, (part.strip() for part in row), strict=True)))
+    error = "部分 GPU 返回格式异常" if malformed else ("未检测到 NVIDIA GPU" if not gpus else None)
+    return {"gpus": gpus, "gpu_error": error}
+
 
 
 def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root: pathlib.Path) -> FastAPI:
     web_root = pathlib.Path(__file__).with_name("web")
-    token = _load_or_create_token(state_dir)
     manager = JobManager(state_dir)
     app = FastAPI(title="OpenPI BPX Research Studio")
-
-    def authenticate(
-        x_bpx_token: str | None = Header(default=None),
-        query_token: str | None = Query(default=None, alias="token"),
-    ) -> None:
-        if not secrets.compare_digest(x_bpx_token or query_token or "", token):
-            raise HTTPException(status_code=401, detail="控制令牌无效")
 
     def start(kind: str, builder):
         try:
@@ -272,15 +260,15 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
             raise HTTPException(status_code=409, detail=str(error)) from error
 
     @app.get("/")
-    async def index(_: None = Depends(authenticate)):
+    def index():
         return FileResponse(web_root / "index.html")
 
     @app.get("/healthz")
-    async def health():
+    def health():
         return {"ok": True}
 
-    @app.get("/api/config", dependencies=[Depends(authenticate)])
-    async def config():
+    @app.get("/api/config")
+    def config():
         checkpoint_root = data_root / "checkpoints"
         return {
             "default_openpi_root": str(project_root),
@@ -291,8 +279,8 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
             **default_paths(data_root),
         }
 
-    @app.get("/api/config-profile", dependencies=[Depends(authenticate)])
-    async def config_profile(config_name: str = DEFAULT_CONFIG_NAME, hf_lerobot_home: str = ""):
+    @app.get("/api/config-profile")
+    def config_profile(config_name: str = DEFAULT_CONFIG_NAME, hf_lerobot_home: str = ""):
         try:
             training_config = importlib.import_module("openpi.training.config")
             selected = training_config.get_config(config_name)
@@ -301,29 +289,35 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
         except (ImportError, ValueError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.get("/api/checkpoints", dependencies=[Depends(authenticate)])
-    async def checkpoints():
-        return _checkpoints(data_root / "checkpoints")
+    @app.get("/api/checkpoints")
+    def checkpoints(checkpoint_root: str = ""):
+        root = pathlib.Path(checkpoint_root).expanduser().resolve() if checkpoint_root else data_root / "checkpoints"
+        return _checkpoints(root)
 
-    @app.get("/api/next-experiment", dependencies=[Depends(authenticate)])
-    async def next_experiment(config_name: str = DEFAULT_CONFIG_NAME):
+    @app.get("/api/next-experiment")
+    def next_experiment(config_name: str = DEFAULT_CONFIG_NAME, checkpoint_root: str = ""):
         try:
-            return {"experiment_name": _next_experiment(data_root / "checkpoints", config_name)}
+            root = pathlib.Path(checkpoint_root).expanduser().resolve() if checkpoint_root else data_root / "checkpoints"
+            return {"experiment_name": _next_experiment(root, config_name)}
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.get("/api/system", dependencies=[Depends(authenticate)])
-    async def system(path: str = ""):
+    @app.get("/api/system")
+    def system(path: str = ""):
         target = pathlib.Path(path).expanduser() if path else data_root
+        target = target.resolve()
+        requested = str(target)
+        while not target.exists() and target != target.parent:
+            target = target.parent
         try:
-            usage = shutil.disk_usage(target.resolve())
+            usage = shutil.disk_usage(target)
             disk = {"path": str(target.resolve()), "total": usage.total, "used": usage.used, "free": usage.free}
         except OSError as error:
             disk = {"path": str(target), "error": str(error)}
-        return {"disk": disk, "gpus": _gpu_snapshot()}
+        return {"disk": {**disk, "requested_path": requested}, **_gpu_snapshot()}
 
-    @app.get("/api/spikes/report", dependencies=[Depends(authenticate)])
-    async def spike_report(
+    @app.get("/api/spikes/report")
+    def spike_report(
         path: str,
         offset: int = Query(default=0, ge=0),
         limit: int = Query(default=100, ge=1, le=500),
@@ -339,8 +333,8 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
         except (OSError, ValueError, TypeError, KeyError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.get("/api/spikes/trace", dependencies=[Depends(authenticate)])
-    async def spike_trace(
+    @app.get("/api/spikes/trace")
+    def spike_trace(
         report_path: str,
         file_index: int = Query(ge=0),
         repair_index: int = Query(ge=0),
@@ -358,26 +352,26 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
         except (OSError, ValueError, TypeError, KeyError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.get("/api/jobs", dependencies=[Depends(authenticate)])
-    async def jobs():
+    @app.get("/api/jobs")
+    def jobs():
         return manager.list()
 
-    @app.get("/api/jobs/{job_id}", dependencies=[Depends(authenticate)])
-    async def job(job_id: str):
+    @app.get("/api/jobs/{job_id}")
+    def job(job_id: str):
         try:
             return manager.get(job_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
-    @app.get("/api/jobs/{job_id}/log", dependencies=[Depends(authenticate)])
-    async def job_log(job_id: str):
+    @app.get("/api/jobs/{job_id}/log")
+    def job_log(job_id: str):
         try:
             return {"text": manager.tail(job_id)}
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
-    @app.get("/api/jobs/{job_id}/metrics", dependencies=[Depends(authenticate)])
-    async def job_metrics(job_id: str, limit: int = 2000):
+    @app.get("/api/jobs/{job_id}/metrics")
+    def job_metrics(job_id: str, limit: int = 2000):
         try:
             return manager.metrics(job_id, limit)
         except KeyError as error:
@@ -385,36 +379,36 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.post("/api/jobs/audit", dependencies=[Depends(authenticate)])
-    async def start_audit(request: AuditRequest):
+    @app.post("/api/jobs/audit")
+    def start_audit(request: AuditRequest):
         return start("audit", lambda: build_audit(project_root, request.model_dump()))
 
-    @app.post("/api/jobs/spikes/scan", dependencies=[Depends(authenticate)])
-    async def start_spike_scan(request: SpikeRequest):
+    @app.post("/api/jobs/spikes/scan")
+    def start_spike_scan(request: SpikeRequest):
         return start("spike_scan", lambda: build_spike_job(project_root, request.model_dump(), apply=False))
 
-    @app.post("/api/jobs/spikes/clean", dependencies=[Depends(authenticate)])
-    async def start_spike_clean(request: SpikeRequest):
+    @app.post("/api/jobs/spikes/clean")
+    def start_spike_clean(request: SpikeRequest):
         return start("spike_clean", lambda: build_spike_job(project_root, request.model_dump(), apply=True))
 
-    @app.post("/api/jobs/normalize", dependencies=[Depends(authenticate)])
-    async def start_normalize(request: NormalizeRequest):
+    @app.post("/api/jobs/normalize")
+    def start_normalize(request: NormalizeRequest):
         return start("normalize", lambda: build_normalize(request.model_dump()))
 
-    @app.post("/api/jobs/export/hdf5", dependencies=[Depends(authenticate)])
-    async def start_hdf5_export(request: Hdf5ExportRequest):
+    @app.post("/api/jobs/export/hdf5")
+    def start_hdf5_export(request: Hdf5ExportRequest):
         return start("hdf5_export", lambda: build_hdf5_export(project_root, request.model_dump()))
 
-    @app.post("/api/jobs/train", dependencies=[Depends(authenticate)])
-    async def start_train(request: TrainRequest):
+    @app.post("/api/jobs/train")
+    def start_train(request: TrainRequest):
         return start("train", lambda: build_train(request.model_dump()))
 
-    @app.post("/api/jobs/serve", dependencies=[Depends(authenticate)])
-    async def start_serve(request: ServeRequest):
+    @app.post("/api/jobs/serve")
+    def start_serve(request: ServeRequest):
         return start("policy_serve", lambda: build_policy_serve(request.model_dump()))
 
-    @app.post("/api/jobs/{job_id}/cancel", dependencies=[Depends(authenticate)])
-    async def cancel(job_id: str):
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel(job_id: str):
         try:
             return manager.cancel(job_id)
         except KeyError as error:
@@ -423,13 +417,12 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
             raise HTTPException(status_code=409, detail=str(error)) from error
 
     app.mount("/static", StaticFiles(directory=web_root), name="static")
-    app.state.control_token = token
     return app
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8866)
     parser.add_argument("--data-root", type=pathlib.Path)
     parser.add_argument("--state-dir", type=pathlib.Path)
@@ -460,7 +453,7 @@ def main() -> None:
     app = create_app(state_dir=state_dir, project_root=project_root, data_root=data_root)
     shown_host = "127.0.0.1" if args.host == "0.0.0.0" else args.host
     logging.basicConfig(level=logging.INFO)
-    logging.info("OpenPI BPX Studio: http://%s:%d/?token=%s", shown_host, args.port, app.state.control_token)
+    logging.info("OpenPI BPX Studio: http://%s:%d/ (LAN: http://<服务器IP>:%d/)", shown_host, args.port, args.port)
     uvicorn.run(app, host=args.host, port=args.port)
 
 

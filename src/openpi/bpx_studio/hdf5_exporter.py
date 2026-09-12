@@ -161,6 +161,7 @@ def export_hdf5(
         with futures.ProcessPoolExecutor(max_workers=workers) as executor:
             records = []
             for index, result in enumerate(executor.map(_export_episode, jobs), start=1):
+                result["path"] = str(output_root / pathlib.Path(result["path"]).relative_to(staging))
                 records.append(result)
                 print(
                     f"EXPORTED {index}/{len(jobs)} episode={result['episode_index']} frames={result['frames']}",

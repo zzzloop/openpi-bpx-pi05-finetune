@@ -29,6 +29,8 @@ def _quote(value: str) -> str:
 
 
 def _existing_directory(value: str, label: str) -> pathlib.Path:
+    if not value.strip():
+        raise ValueError(f"{label}不能为空")
     path = pathlib.Path(value).expanduser().resolve()
     if not path.is_dir():
         raise ValueError(f"{label}不存在或不是目录: {path}")
@@ -36,6 +38,8 @@ def _existing_directory(value: str, label: str) -> pathlib.Path:
 
 
 def _output_path(value: str, label: str) -> pathlib.Path:
+    if not value.strip():
+        raise ValueError(f"{label}不能为空")
     path = pathlib.Path(value).expanduser().resolve()
     if path == path.parent:
         raise ValueError(f"{label}不能是文件系统根目录")
@@ -201,6 +205,9 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
     mode = str(values.get("mode", "overwrite"))
     if mode not in {"overwrite", "resume"}:
         raise ValueError("训练模式只能是 overwrite 或 resume")
+    experiment_dir = checkpoint_root / config / experiment
+    if mode == "overwrite" and experiment_dir.exists():
+        raise ValueError("实验目录已存在，请换一个实验名，或选择断点续训，避免覆盖 checkpoint")
     env = _data_environment({key: str(value) for key, value in values.items()})
     env.update(CUDA_VISIBLE_DEVICES=cuda_devices, XLA_PYTHON_CLIENT_MEM_FRACTION=f"{memory_fraction:.4g}")
     return CommandSpec(

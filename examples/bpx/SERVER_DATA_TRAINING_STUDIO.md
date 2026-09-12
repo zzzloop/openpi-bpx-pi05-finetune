@@ -21,7 +21,7 @@
 │   ├── huggingface/
 │   └── uv/
 ├── tmp/
-└── dashboard_state/     # 任务状态、日志和访问令牌
+└── dashboard_state/     # 任务状态与日志
 ```
 
 归一化统计仍由 OpenPI 按配置写入仓库的 `assets/<config>/.../norm_stats.json`。它很小，而且必须和训练 config 对应，不需要迁到 `/scratch`。
@@ -62,15 +62,39 @@ bash scripts/start_bpx_studio.sh --host 127.0.0.1 --port 8866
 
 `/scratch/bpx_datasets` 已经是程序内置默认值，因此日常启动不需要重复 `export BPX_DATA_ROOT`，也不需要传 `--data-root`；只有迁移数据盘时才使用这两个覆盖入口。
 
-终端会打印带随机控制令牌的 URL。控制台仅监听服务器本机；从工作电脑访问时使用 SSH 隧道：
+默认监听 `0.0.0.0:8866`，无需 token。在局域网浏览器打开 `http://服务器IP:8866/`。旧 `.server-token` 文件不再读取，无需删除。该入口允许访问者启动和停止服务器任务，按局域网共享控制台使用。
+
+更新后重启原启动命令，浏览器强制刷新。运行只读检查：
 
 ```bash
-ssh -L 8866:127.0.0.1:8866 kemove@训练服务器IP
+python scripts/verify_bpx_studio.py
 ```
 
-然后在本机浏览器打开终端打印的 `http://127.0.0.1:8866/?token=...`。不要把令牌提交到 Git。
+检查 API、默认数据链、磁盘和 GPU 状态，不会启动训练。GPU 查询超时、驱动缺失或异常行现在会显示具体诊断，并自动重试。
 
 ## 推荐操作顺序
+
+### 毛刺算法与复核
+
+`isolated-excursion-v2` 使用逐维、原始单位的相邻帧跳变量，不按所有关节共用一个阈值。
+自动修复要求：中心帧相对前后帧都超过 `jump_thresholds`，前后帧差不超过
+`neighbor_thresholds`，并且中心值是局部峰或谷。修复值取两侧均值。
+相邻候选相互依赖时不修改，避免把交替振荡翻转成新的异常。
+
+持续阶跃、多个连续异常点、首尾跳变不会直接平滑。报告记录修复后仍超过阈值的
+相邻帧跳变数量与位置；页面显示前 100 个位置，JSON 每文件每特征最多保留 200 个示例。
+这些跳变可能是真实快速动作，也可能是异常，需人工查看原轨迹。
+结构审计 PASS 只表示结构和数值有效，不代表轨迹已没有异常。
+旧报告不含剩余跳变统计，更新算法后请重新扫描。
+
+单帧真实快速往返动作也可能满足孤立峰值条件，算法无法只靠三个采样点判断动作意图。
+因此关节弧度、夹爪开合量和其他维度必须分别设置阈值；不要直接照抄示例阈值。
+工具拒绝跨 episode、缺帧或乱序帧插值，保留未修改数据的原列精度，且不改写源数据。
+
+本地回归包含小型真实 MP4/Parquet 的审计 → 清洗 → 复审 → HDF5 导出，
+以及归一化/训练/推理的命令与路径绑定。它不替代服务器真实数据训练和模型效果验证。
+
+### 工作流程
 
 约定的数据流如下；仪表盘会自动填入这些路径：
 
@@ -78,7 +102,7 @@ ssh -L 8866:127.0.0.1:8866 kemove@训练服务器IP
 采集仓库 recordings/lerobot/bpx_v2_humanoid_raw
   → /scratch/bpx_datasets/lerobot/bpx/bpx_v2_humanoid_raw
   → 数据审计与毛刺扫描
-  → /scratch/bpx_datasets/lerobot/bpx/bpx_v2_humanoid
+  → /scratch/bpx_datasets/lerobot/bpx/bpx_blocks_multitask_v2
   → 归一化
   → OpenPI 训练
   → /scratch/bpx_datasets/checkpoints/<config>/<experiment>/<step>

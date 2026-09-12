@@ -6,19 +6,20 @@
     <title>OpenPI · BPX Research Studio</title>
     <link rel="stylesheet" href="/static/app.css" />
     <link rel="stylesheet" href="/static/guidance.css" />
+  <link rel="stylesheet" href="/static/workspace.css" />
   </head>
   <body>
-    <header><div class="logo">π</div><div><small>OPENPI · BPX LAB</small><h1>Research Data Studio</h1></div><span class="version">SERVER PIPELINE</span><span id="connection" class="pill">连接中</span></header>
+    <header><div class="logo">π</div><div><small>OPENPI · BPX LAB</small><h1>BPX 数据与训练工作台</h1></div><span class="version">LAN · STUDIO</span><span id="connection" class="pill">连接中</span></header>
     <main>
       <section class="hero">
-        <div><b>DATA → POLICY</b><h2>可复现的数据工程与训练控制台</h2><p>让每一步都能回答三个问题：输入来自哪里、产生什么输出、下一步是否真正使用了它。</p></div>
-        <aside><div class="title"><h3>服务器状态</h3><button id="refreshSystem">刷新</button></div><div id="gpuGrid">等待 GPU 信息…</div><div class="disk"><span>数据盘</span><strong id="diskUsage">—</strong></div><progress id="diskMeter" max="100" value="0"></progress></aside>
+        <div><b>DATA → POLICY</b><h2>从示教数据，到机器人策略</h2><p>审计、清洗、归一化与训练，在一个工作台完成。输入与输出逐步对齐，任务进度随时可查。</p></div>
+        <aside><div class="title"><h3>服务器状态</h3><button id="refreshSystem">刷新</button></div><div id="gpuGrid">等待 GPU 信息…</div><div class="disk"><span>数据盘</span><strong id="diskUsage">—</strong></div><progress id="diskMeter" max="100" value="0"></progress><div id="systemUpdated" class="status-time" aria-live="polite">正在连接服务器</div></aside>
       </section>
 
-      <section class="card"><div class="section-title"><h2><em>00</em>运行环境</h2><span>默认大文件根目录：/scratch/bpx_datasets</span></div><div class="grid three">
+      <section class="card"><details class="environment"><summary>运行环境与存储路径<small>已填入服务器默认路径 · 点击调整</small></summary><div class="grid three">
         <label>OpenPI 根目录<input id="openpiRoot" /></label><label>LeRobot 数据根目录<input id="hfLerobotHome" /></label><label>Checkpoint 根目录<input id="checkpointRoot" /></label>
         <label>Hugging Face 缓存<input id="hfHome" /></label><label>Datasets 缓存<input id="hfDatasetsCache" /></label><label>临时目录<input id="tmpdir" /></label><label>uv 缓存<input id="uvCacheDir" /></label>
-      </div></section>
+      </div></details></section>
 
       <section class="card pipeline-card"><div class="section-title"><h2><em>FLOW</em>当前数据链</h2><span id="flowStatus" class="flow-status">正在解析 Config…</span></div>
         <div class="pipeline">
@@ -48,7 +49,7 @@
           <div class="review-pagination"><button id="spikePrev">上一页</button><span id="spikePage">—</span><button id="spikeNext">下一页</button></div>
           <div class="trace-panel"><div class="title"><div><small id="traceLabel">SELECT A HIT</small><h3 id="traceTitle">选择一行查看前后帧</h3></div><span class="legend"><i></i>原始 <i></i>清洗/预览</span></div><svg id="spikeTraceChart" viewBox="0 0 900 260"></svg><div class="trace-grid"><div><h4>逐帧数值</h4><div class="review-table-wrap"><table class="review-table compact"><thead><tr><th>帧</th><th>时间戳</th><th>原始</th><th>清洗/预览</th><th>变化</th></tr></thead><tbody id="traceRows"><tr><td colspan="5">—</td></tr></tbody></table></div></div><div><h4>命中帧全部维度</h4><div class="review-table-wrap"><table class="review-table compact"><thead><tr><th>维度 / 关节</th><th>原始</th><th>清洗</th></tr></thead><tbody id="traceVectorRows"><tr><td colspan="3">—</td></tr></tbody></table></div></div></div></div>
         </section>
-      </section>
+      <div id="unresolvedReview" class="binding warn">扫描后显示剩余大跳变，未确定的异常保留原值。</div><details><summary>剩余大跳变位置（最多显示前 100 个，完整计数见报告）</summary><div class="review-table-wrap"><table class="review-table"><thead><tr><th>Episode</th><th>特征 / 维度</th><th>帧</th><th>前值</th><th>当前值</th><th>跳变量</th></tr></thead><tbody id="unresolvedRows"><tr><td colspan="6">尚未扫描</td></tr></tbody></table></div></details></section>
 
       <section class="card panel" data-panel="normalize"><div class="section-title"><h2><em>03</em>OpenPI 归一化</h2><span>Config 是数据、模型契约与归一化资产的唯一来源</span></div><div class="grid three">
         <label class="wide">Config name（可输入已注册的自定义配置）<input id="normConfig" list="bpxConfigNames" /><small>要更换数据集，请选择或新增指向目标 repo_id 的 OpenPI Config。</small></label><label>DataLoader workers<input id="normWorkers" type="number" value="32" /><small>32 是当前服务器已验证的高效设置。</small></label>
@@ -61,13 +62,13 @@
       </div><button id="startExport" class="primary">导出 HDF5</button></section>
 
       <section class="card panel" data-panel="train"><div class="section-title"><h2><em>05</em>OpenPI 训练</h2><span>关键参数全部显式记录</span></div><div class="grid four">
-        <label class="wide">Config name<input id="trainConfig" list="bpxConfigNames" /></label><label class="wide">Experiment name<input id="expName" /></label><label>CUDA 设备<input id="cudaDevices" value="2,3" /></label><label>XLA 显存比例<input id="memoryFraction" value="0.96" /></label><label>Global batch<input id="batchSize" type="number" value="2" /></label><label>FSDP devices<input id="fsdpDevices" type="number" value="2" /></label><label>训练 steps<input id="trainSteps" type="number" value="200000" /></label><label>保存间隔<input id="saveInterval" type="number" value="5000" /></label><label>长期保留间隔<input id="keepPeriod" type="number" value="25000" /></label><label>模式<select id="trainMode"><option value="overwrite">新实验 / overwrite</option><option value="resume">断点续训 / resume</option></select></label>
+        <label class="wide">Config name<input id="trainConfig" list="bpxConfigNames" /></label><label class="wide">Experiment name<input id="expName" /><button id="newExperiment" type="button">生成未使用的实验名</button></label><label>CUDA 设备<input id="cudaDevices" value="2,3" /></label><label>XLA 显存比例<input id="memoryFraction" value="0.96" /></label><label>Global batch<input id="batchSize" type="number" value="2" /></label><label>FSDP devices<input id="fsdpDevices" type="number" value="2" /></label><label>训练 steps<input id="trainSteps" type="number" value="200000" /></label><label>保存间隔<input id="saveInterval" type="number" value="5000" /></label><label>长期保留间隔<input id="keepPeriod" type="number" value="25000" /></label><label>模式<select id="trainMode"><option value="overwrite">新实验 / overwrite</option><option value="resume">断点续训 / resume</option></select></label>
         <label class="wide readonly-field">训练实际读取的数据集 <span class="lock">CONFIG 锁定</span><input id="trainDatasetSource" readonly /><small>必须与本次归一化所读取的数据集一致。</small></label><label class="wide readonly-field">训练加载的归一化统计 <span class="lock">CONFIG 锁定</span><input id="trainStatsSource" readonly /><small>只是小型统计 JSON，不包含图像或 episode 数据。</small></label>
       </div><div id="trainPurpose" class="config-note">—</div><button id="startTrain" class="primary">启动训练</button></section>
 
       <section class="card panel" data-panel="serve"><div class="section-title"><h2><em>06</em>Checkpoint 推理服务</h2><span>自动扫描完整 checkpoint，默认监听 8000</span></div><div class="grid three">
         <label class="wide">Config name（由 checkpoint 自动匹配）<input id="serveConfig" readonly /></label><label class="wide">全部完整 checkpoint<select id="serveCheckpoint"><option value="">正在扫描…</option></select></label><label>CUDA 设备<input id="serveCudaDevices" value="2,3" /></label><label>XLA 显存比例<input id="serveMemoryFraction" value="0.96" /></label>
-      </div><div class="buttons"><button id="startServe" class="primary">启动模型推理</button><button id="stopServe" class="danger">停止模型推理</button></div></section>
+      </div><div class="buttons"><button id="refreshCheckpoints">刷新 Checkpoint</button><button id="startServe" class="primary">启动模型推理</button><button id="stopServe" class="danger">停止模型推理</button></div></section>
 
       <section class="monitor"><article class="card jobs"><div class="title"><h2>任务记录</h2><button id="refreshJobs">刷新</button></div><div id="jobList">暂无任务</div></article><article class="card details"><div class="title"><div><small id="selectedKind">NO JOB</small><h2 id="selectedTitle">选择任务查看详情</h2></div><button id="cancelJob" class="danger" hidden>终止任务</button></div><div class="progress-line"><span id="progressText">0 / 0</span><strong id="progressPercent">0%</strong></div><progress id="progressBar" max="100" value="0"></progress><div class="metrics"><div>LOSS<strong id="metricLoss">—</strong></div><div>GRAD NORM<strong id="metricGrad">—</strong></div><div>LEARNING RATE<strong id="metricLr">—</strong></div><div>STATUS<strong id="metricStatus">—</strong></div></div><div class="charts"><svg id="lossChart" viewBox="0 0 600 170"></svg><svg id="normChart" viewBox="0 0 600 170"></svg></div><details><summary>受控命令与环境</summary><pre id="commandText">—</pre></details><pre id="jobLog" class="log">任务日志将在这里显示。</pre></article></section>
     </main><datalist id="bpxConfigNames"></datalist><div id="toast"></div><script src="/static/app.js"></script>

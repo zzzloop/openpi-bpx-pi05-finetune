@@ -1,7 +1,4 @@
 const $ = (id) => document.getElementById(id);
-const token = new URLSearchParams(location.search).get("token") || localStorage.getItem("bpx-token") || "";
-if (token) localStorage.setItem("bpx-token", token);
-
 const defaultsVersion = "4";
 const stored = [
   "openpiRoot", "hfLerobotHome", "checkpointRoot", "hfHome", "hfDatasetsCache", "tmpdir", "uvCacheDir",
@@ -46,9 +43,9 @@ function dataEnvironment() {
 }
 
 async function api(path, options = {}) {
-  const headers = { "X-BPX-Token": token, ...options.headers };
+  const headers = { ...options.headers };
   if (options.body) headers["Content-Type"] = "application/json";
-  const response = await fetch(path, { ...options, headers });
+  const response = await fetch(path, { signal: AbortSignal.timeout(20000), ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
   return body;
@@ -207,7 +204,7 @@ async function loadConfigProfile() {
 }
 
 async function confirmDataBinding(action) {
-  if (!currentConfigProfile) return confirm(`当前 Config 尚未成功解析，仍要${action}吗？`);
+  if (!currentConfigProfile) { toast("配置尚未解析成功，请修复配置后重试", true); return false; }
   if (!currentConfigProfile.stats_paths_match) {
     toast("归一化写入与训练加载路径不一致，操作已阻止", true);
     return false;
@@ -302,6 +299,11 @@ function numeric(valueToFormat, digits = 6) {
 
 function renderSpikeReport(report) {
   currentSpikeReport = report;
+  $("unresolvedReview").textContent = report.unresolved_jumps == null
+    ? "旧版报告未统计剩余大跳变，请重新扫描。"
+    : `自动修复后仍有 ${report.unresolved_jumps} 个大跳变（相邻帧 × 维度计数）。阶跃、连续异常和边界跳变保留原值，需要人工复核。结构审计 PASS 不代表所有跳变已消除。`;
+  $("unresolvedRows").innerHTML = (report.unresolved_examples || []).map((hit) =>
+    `<tr><td>${escapeHtml(String(hit.episode_index ?? "—"))}</td><td>${escapeHtml(hit.feature)} · ${hit.dimension}</td><td>${hit.frame_index}</td><td>${numeric(hit.previous)}</td><td>${numeric(hit.current)}</td><td>${numeric(hit.delta)}</td></tr>`).join("") || "<tr><td colspan='6'>暂无记录</td></tr>";
   $("spikeTotal").textContent = report.applied
     ? `${report.total_repairs} 已修复`
     : `${report.total_repairs} 个候选`;
@@ -477,22 +479,30 @@ function human(bytes) {
   return `${bytes.toFixed(index ? 1 : 0)} ${units[index]}`;
 }
 
+let systemRefreshing = false;
 async function refreshSystem() {
+  if (systemRefreshing) return;
+  systemRefreshing = true;
+  $("refreshSystem").disabled = true;
   try {
     const snapshot = await api(`/api/system?path=${encodeURIComponent(value("checkpointRoot"))}`);
     $("connection").textContent = "服务正常";
     $("connection").className = "pill ok";
     $("gpuGrid").innerHTML = snapshot.gpus.length
-      ? snapshot.gpus.map((gpu) => `<div class="gpu"><strong>GPU ${gpu.index} · ${gpu.name}</strong>${gpu.memory_used_mib}/${gpu.memory_total_mib} MiB · ${gpu.utilization_percent}% · ${gpu.temperature_c}°C</div>`).join("")
-      : "未读取到 NVIDIA GPU";
+      ? snapshot.gpus.map((gpu) => `<div class="gpu"><strong>GPU ${escapeHtml(gpu.index)} · ${escapeHtml(gpu.name)}</strong>${escapeHtml(gpu.memory_used_mib)}/${escapeHtml(gpu.memory_total_mib)} MiB · ${escapeHtml(gpu.utilization_percent)}% · ${escapeHtml(gpu.temperature_c)}°C</div>`).join("")
+      : escapeHtml(snapshot.gpu_error || "未检测到 NVIDIA GPU");
+    $("systemUpdated").textContent = `更新于 ${new Date().toLocaleTimeString()}${snapshot.gpu_error && snapshot.gpus.length ? " · " + snapshot.gpu_error : ""}`;
     if (!snapshot.disk.error) {
       $("diskUsage").textContent = `${human(snapshot.disk.free)} 可用 / ${human(snapshot.disk.total)}`;
       $("diskMeter").value = 100 * snapshot.disk.used / snapshot.disk.total;
     }
-  } catch (_error) {
+    else { $("diskUsage").textContent = snapshot.disk.error; $("diskMeter").value = 0; }
+  } catch (error) {
+    $("gpuGrid").textContent = `状态读取失败：${error.message}。将自动重试，也可点击刷新。`;
+    $("systemUpdated").textContent = "本次更新失败";
     $("connection").textContent = "连接失败";
     $("connection").className = "pill bad";
-  }
+  } finally { systemRefreshing = false; $("refreshSystem").disabled = false; }
 }
 
 function escapeHtml(text) {
@@ -588,7 +598,8 @@ function applyCheckpointConfig() {
 }
 
 async function loadCheckpoints(preferred) {
-  checkpointRecords = await api("/api/checkpoints");
+  try {
+  checkpointRecords = await api(`/api/checkpoints?checkpoint_root=${encodeURIComponent(value("checkpointRoot"))}`);
   const select = $("serveCheckpoint");
   select.innerHTML = checkpointRecords.length
     ? checkpointRecords.map((item) => `<option value="${escapeHtml(item.path)}">${escapeHtml(item.config_name)} / ${escapeHtml(item.experiment_name)} / step ${item.step}</option>`).join("")
@@ -598,7 +609,23 @@ async function loadCheckpoints(preferred) {
   if (preferredRecord) select.value = preferredRecord.path;
   else if (sameConfig) select.value = sameConfig.path;
   applyCheckpointConfig();
+  $("startServe").disabled = !select.value;
+  } catch (error) {
+    checkpointRecords = [];
+    $("serveCheckpoint").innerHTML = "<option value=''>扫描失败，请点击刷新重试</option>";
+    $("startServe").disabled = true;
+    toast(error.message, true);
+  }
 }
+
+$("refreshCheckpoints").onclick = () => loadCheckpoints(value("serveCheckpoint"));
+$("newExperiment").onclick = async () => {
+  try {
+    const query = new URLSearchParams({config_name: value("trainConfig"), checkpoint_root: value("checkpointRoot")});
+    $("expName").value = (await api(`/api/next-experiment?${query}`)).experiment_name;
+    save();
+  } catch (error) { toast(error.message, true); }
+};
 
 async function synchronizeConfig(event) {
   const configName = event.target.value.trim();
@@ -606,7 +633,7 @@ async function synchronizeConfig(event) {
     if ($(id) !== event.target) $(id).value = configName;
   });
   try {
-    $("expName").value = (await api(`/api/next-experiment?config_name=${encodeURIComponent(configName)}`)).experiment_name;
+    $("expName").value = (await api(`/api/next-experiment?config_name=${encodeURIComponent(configName)}&checkpoint_root=${encodeURIComponent(value("checkpointRoot"))}`)).experiment_name;
   } catch (error) {
     toast(error.message, true);
   }
@@ -617,7 +644,11 @@ async function synchronizeConfig(event) {
 ["normConfig", "trainConfig"].forEach((id) => $(id).addEventListener("change", synchronizeConfig));
 $("serveCheckpoint").addEventListener("change", applyCheckpointConfig);
 $("hfLerobotHome").addEventListener("change", loadConfigProfile);
-$("cleanOutput").addEventListener("change", loadConfigProfile);
+$("cleanOutput").addEventListener("change", () => {
+  $("exportSource").value = value("cleanOutput");
+  save();
+  loadConfigProfile();
+});
 $("spikeSource").addEventListener("change", loadConfigProfile);
 $("checkpointRoot").addEventListener("change", async () => {
   await Promise.all([loadCheckpoints(value("serveCheckpoint")), refreshSystem()]);
@@ -658,10 +689,11 @@ async function init() {
       expName: config.default_experiment_name,
     };
     Object.entries(defaults).forEach(([id, val]) => {
+      if (["cleanOutput", "exportSource"].includes(id) && pathMatches($(id).value, `${config.hf_lerobot_home}/bpx/bpx_v2_humanoid`)) $(id).value = val;
       if ($(id) && !$(id).value) $(id).value = val;
     });
     $("bpxConfigNames").innerHTML = config.known_config_names.map((name) => `<option value="${escapeHtml(name)}"></option>`).join("");
-    await Promise.all([
+    await Promise.allSettled([
       loadCheckpoints(localStorage.getItem("bpx-serveCheckpoint")),
       loadConfigProfile(),
       refreshSystem(),
@@ -672,6 +704,7 @@ async function init() {
   }
 }
 
+refreshSystem();
 init();
 setInterval(refreshJobs, 2000);
 setInterval(refreshSystem, 15000);

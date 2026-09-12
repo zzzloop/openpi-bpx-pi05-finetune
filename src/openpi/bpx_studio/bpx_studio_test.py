@@ -34,7 +34,7 @@ def test_default_paths_keep_large_artifacts_under_data_root(tmp_path: pathlib.Pa
     assert paths["checkpoint_root"] == str(tmp_path / "checkpoints")
     assert paths["state_root"] == str(tmp_path / "dashboard_state")
     assert pathlib.Path(paths["raw_dataset"]).parts[-3:] == ("lerobot", "bpx", "bpx_v2_humanoid_raw")
-    assert pathlib.Path(paths["clean_dataset"]).parts[-3:] == ("lerobot", "bpx", "bpx_v2_humanoid")
+    assert pathlib.Path(paths["clean_dataset"]).parts[-3:] == ("lerobot", "bpx", "bpx_blocks_multitask_v2")
     assert paths["spike_scan_report"].endswith("bpx_v2_humanoid_spikes_scan.json")
     assert paths["spike_clean_report"].endswith("bpx_v2_humanoid_spikes_clean.json")
     assert all(pathlib.Path(path).is_relative_to(tmp_path) for path in paths.values())
@@ -97,7 +97,7 @@ def test_config_profile_exposes_actual_dataset_and_norm_asset_binding(tmp_path: 
     assert mismatched["computed_stats_path"] != mismatched["loaded_stats_path"]
 
 
-def test_dashboard_routes_and_control_token_are_created(tmp_path: pathlib.Path) -> None:
+def test_dashboard_routes_do_not_require_or_create_token(tmp_path: pathlib.Path) -> None:
     app = create_app(
         state_dir=tmp_path / "state",
         project_root=tmp_path / "openpi",
@@ -113,8 +113,14 @@ def test_dashboard_routes_and_control_token_are_created(tmp_path: pathlib.Path) 
         "/api/jobs/train",
         "/api/jobs/normalize",
     } <= routes
-    assert app.state.control_token
-    assert (tmp_path / "state" / ".server-token").is_file()
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        assert client.get("/").status_code == 200
+        assert client.get("/api/config").status_code == 200
+        assert client.get("/api/jobs").json() == []
+        assert client.post("/api/jobs/train", json={}).status_code == 422
+    assert not (tmp_path / "state" / ".server-token").exists()
 
 
 def test_studio_launcher_is_strictly_offline() -> None:
