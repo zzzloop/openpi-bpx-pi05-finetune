@@ -90,6 +90,7 @@ class Hdf5ExportRequest(BaseModel):
     workers: int = Field(default=4, ge=1, le=64)
     compression: Literal["gzip", "lzf", "none"] = "gzip"
     compression_level: int = Field(default=4, ge=0, le=9)
+    episode_indices: list[int] | None = None
 
 
 class TrainRequest(DataEnvironment):

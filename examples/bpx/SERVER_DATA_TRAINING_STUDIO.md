@@ -141,6 +141,8 @@ HF_LEROBOT_HOME/<repo_id>
 
 ## 毛刺阈值文件
 
+一代 BPX 30 FPS、18 维有效顺序数据可先使用 `examples/bpx/bpx_18d_spike_thresholds_scan.json` **仅扫描**。这份文件是未经当前数据集标定的初筛起点，不是可以无条件自动清洗的标准。适用范围、单位与限制见同目录 `BPX_18D_SPIKE_SCAN_CN.md`。数据维度/顺序/单位、采样率或机器人改变时必须重新评估；换任务但数值契约不变时可复用为初筛起点。
+
 阈值文件必须为每个 state/action 维度分别提供跳变阈值和邻点一致阈值：
 
 ```json
@@ -157,6 +159,36 @@ HF_LEROBOT_HOME/<repo_id>
 ```
 
 上例只有两维，只说明格式，不能直接用于真实机器人。实际数组长度必须严格等于对应特征维度。算法仅在中心点同时远离前后两点、且前后两点彼此接近时，用前后均值替换中心点；不会平滑整段轨迹。
+
+## HDF5 导出：image 和 video 均支持
+
+旧版导出器只接受 `dtype=video`；新版直接解码 Parquet 中 `dtype=image` 的图片字节或源数据集内图片路径，也支持 MP4 与 image 混合的相机特征。不需要先转 MP4。导出保持源帧序，检查 frame_index、时间戳、episode 长度、图像形状及视频帧数，图像统一写为 RGB uint8，不缩放、不裁剪、不做图像增强。
+
+建议在“指定 episode”先填 `0`，输出目录填一个尚不存在的新目录，例如 `/scratch/bpx_datasets/exports/combined_check_ep0`。留空才导出全部；可填 `0,2,5` 选择几条，编号不重排。HDF5 是解码后像素数组，gzip/lzf 为无损压缩；整体体积可能大于 MP4 数据，先用单条结果估算磁盘，不要直接全量导出。
+
+离线启动脚本已经安装好依赖时，也可直接使用项目 Python：
+
+```bash
+.venv/bin/python -m openpi.bpx_studio.hdf5_exporter \
+  /scratch/bpx_datasets/lerobot/bpx/bpx_blocks_combined \
+  /scratch/bpx_datasets/exports/combined_check_ep0 \
+  --episodes 0 --workers 1 --compression gzip --compression-level 4
+```
+
+每条输出如下：
+
+```text
+episode_000000.hdf5
+├── action                         # 原数值、原维度（本例 T×18）
+├── frame_index                    # 源帧号
+├── task_index                     # 逐帧任务索引
+└── observations
+    ├── qpos                       # 原 state（本例 T×18）
+    ├── timestamp                  # 源时间戳
+    └── images/<camera>             # T×H×W×3 RGB uint8
+```
+
+文件属性保留 FPS、相机颜色约定、源 features、源 episode 元数据与任务语言映射；目录附 SHA-256 manifest。state/action 的浮点精度不改变，不归一化、不转 delta，也不把 18 维重新扩展为一代 raw-23。它用于通用 HDF5 检视和派生处理，不能直接假定与旧版要求 raw-23 的 HDF5 训练/评估工具兼容。LeRobot 源、原模型、归一化均不改动。
 
 ## 训练与续训约束
 

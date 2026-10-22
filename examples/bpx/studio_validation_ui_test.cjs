@@ -21,6 +21,7 @@ const {chromium} = require('playwright');
     }, display: {loss_trend: .03, loss_outlier: index === 1}}));
     let generated = false;
     let splitRequest;
+    const exportRequests = [];
     const profileQueries = [];
     await page.route('http://studio.test/**', async route => {
       const url = new URL(route.request().url());
@@ -39,6 +40,9 @@ const {chromium} = require('playwright');
       } else if (url.pathname === '/api/jobs/validation-split') {
         splitRequest = route.request().postDataJSON(); generated = true;
         data = {id: 'split-test', kind: 'validation_split', status: 'running'};
+      } else if (url.pathname === '/api/jobs/export/hdf5') {
+        exportRequests.push(route.request().postDataJSON());
+        data = {id: 'export-test', kind: 'hdf5_export', status: 'running'};
       } else if (url.pathname === '/api/jobs') data = generated ? [{id:'split-test',kind:'validation_split',status:'succeeded',progress:{}},job] : [job];
       else if (url.pathname.endsWith('/metrics')) data = metrics;
       else if (url.pathname.endsWith('/log')) data = {text:'synthetic metrics'};
@@ -69,8 +73,25 @@ const {chromium} = require('playwright');
     assert.equal(splitRequest.fraction, .1);
     await page.waitForTimeout(100);
     assert(profileQueries.includes(split));
+    await page.locator('[data-tab="export"]').click();
+    await page.locator('#exportSource').fill(dataset);
+    await page.locator('#exportOutput').fill('/scratch/demo/exports/check_one');
+    await page.locator('#exportEpisodes').fill('0，2');
+    await page.locator('#startExport').click();
+    await page.waitForFunction(() => document.querySelector('#exportEpisodes').value === '0，2');
+    await page.waitForTimeout(100);
+    assert.deepEqual(exportRequests.at(-1).episode_indices, [0, 2]);
+    await page.locator('#exportEpisodes').fill('-1');
+    const count = exportRequests.length;
+    await page.locator('#startExport').click();
+    await page.waitForTimeout(100);
+    assert.equal(exportRequests.length, count);
+    await page.locator('#exportEpisodes').fill('');
+    await page.locator('#startExport').click();
+    await page.waitForTimeout(100);
+    assert.equal(exportRequests.at(-1).episode_indices, null);
     if (process.env.BPX_UI_SCREENSHOT) await page.screenshot({path:process.env.BPX_UI_SCREENSHOT,fullPage:true});
     assert.deepEqual(errors, []);
-    console.log('PASS: evaluation chart, raw/trend switch, grouped split creation, normalization binding, no JS errors');
+    console.log('PASS: evaluation chart, raw/trend switch, grouped split, normalization binding, episode export selection, no JS errors');
   } finally { await browser.close(); }
 })().catch(error => {console.error(error);process.exitCode=1;});

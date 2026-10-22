@@ -152,6 +152,12 @@ def build_hdf5_export(project_root: pathlib.Path, values: Mapping[str, object]) 
     level = int(values.get("compression_level", 4))
     if not 0 <= level <= 9:
         raise ValueError("gzip 压缩级别必须在 0 到 9 之间")
+    episodes = values.get("episode_indices")
+    episode_args: tuple[str, ...] = ()
+    if episodes is not None:
+        if not isinstance(episodes, list) or not episodes or any(type(index) is not int or index < 0 for index in episodes):
+            raise ValueError("episode 索引必须是非空的非负整数列表")
+        episode_args = ("--episodes", *(str(index) for index in sorted(set(episodes))))
     return CommandSpec(
         argv=(
             sys.executable,
@@ -165,6 +171,7 @@ def build_hdf5_export(project_root: pathlib.Path, values: Mapping[str, object]) 
             compression,
             "--compression-level",
             str(level),
+            *episode_args,
         ),
         cwd=project_root,
     )

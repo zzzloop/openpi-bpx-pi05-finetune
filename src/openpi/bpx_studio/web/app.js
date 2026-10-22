@@ -4,7 +4,7 @@ const stored = [
   "openpiRoot", "hfLerobotHome", "checkpointRoot", "hfHome", "hfDatasetsCache", "tmpdir", "uvCacheDir",
   "auditDataset", "auditReport", "auditWorkers", "auditVideoCheck", "spikeSource", "spikeWorkers",
   "thresholdsPath", "spikeScanReport", "spikeCleanReport", "cleanOutput", "normConfig", "normWorkers", "exportSource",
-  "exportOutput", "exportWorkers", "exportCompression", "compressionLevel", "trainConfig", "expName",
+  "exportOutput", "exportWorkers", "exportCompression", "compressionLevel", "exportEpisodes", "trainConfig", "expName",
   "cudaDevices", "memoryFraction", "batchSize", "fsdpDevices", "trainSteps", "saveInterval", "keepPeriod",
   "trainMode", "serveConfig", "serveCheckpoint", "serveCudaDevices", "serveMemoryFraction",
   "validationManifest", "validationOutput", "validationSource", "validationGrouping", "validationFraction",
@@ -450,10 +450,18 @@ $("startNormalize").onclick = async () => {
     validation_manifest: value("validationManifest"),
   });
 };
-$("startExport").onclick = () => start("/api/jobs/export/hdf5", {
-  source_root: value("exportSource"), output_root: value("exportOutput"), workers: num("exportWorkers"),
-  compression: value("exportCompression"), compression_level: num("compressionLevel"),
-});
+$("startExport").onclick = () => {
+  const rawEpisodes = value("exportEpisodes");
+  if (rawEpisodes && !/^\d+(?:\s*[,，]\s*\d+)*$/.test(rawEpisodes)) {
+    toast("episode 请填写非负整数，用逗号分隔，例如 0,2,5；留空表示全部");
+    return;
+  }
+  start("/api/jobs/export/hdf5", {
+    source_root: value("exportSource"), output_root: value("exportOutput"), workers: num("exportWorkers"),
+    compression: value("exportCompression"), compression_level: num("compressionLevel"),
+    episode_indices: rawEpisodes ? rawEpisodes.split(/[,，]/).map(Number) : null,
+  });
+};
 $("startTrain").onclick = async () => {
   await loadConfigProfile();
   if (!(await confirmDataBinding("启动训练"))) return;
