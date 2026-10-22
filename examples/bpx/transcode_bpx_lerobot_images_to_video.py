@@ -12,9 +12,10 @@ from __future__ import annotations
 
 from concurrent import futures
 import copy
+import json
 import pathlib
 import shutil
-from typing import Any
+from typing import Any, Literal
 
 import convert_bpx_data_to_lerobot as bpx_converter
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -26,6 +27,8 @@ from validate_bpx_lerobot import _list_column
 from validate_bpx_lerobot import _to_rgb_uint8
 from validate_bpx_lerobot import _validate_metadata
 
+from openpi.bpx_studio.audit import audit_dataset
+
 _AUTOMATIC_FEATURES = {"index", "episode_index", "frame_index", "timestamp", "task_index"}
 _NUMERIC_FEATURES = ("observation.state", "action")
 
@@ -34,6 +37,8 @@ class _ParallelVideoLeRobotDataset(LeRobotDataset):
     """LeRobot v2.1 writer that encodes independent camera streams concurrently."""
 
     video_encode_workers = 1
+    video_codec = "h264"
+    video_crf = 18
 
     def encode_episode_videos(self, episode_index: int) -> dict[str, str]:
         video_keys = list(self.meta.video_keys)
@@ -46,7 +51,11 @@ class _ParallelVideoLeRobotDataset(LeRobotDataset):
                     image_key=key,
                     frame_index=0,
                 ).parent
-                encode_video_frames(image_dir, video_path, self.fps, overwrite=True)
+                encode_video_frames(
+                    image_dir, video_path, self.fps,
+                    vcodec=self.video_codec, pix_fmt="yuv420p", g=2, crf=self.video_crf,
+                    overwrite=True,
+                )
             return key, str(video_path)
 
         workers = min(self.video_encode_workers, len(video_keys))
@@ -110,12 +119,14 @@ def _validate_numeric_episode(source: LeRobotDataset, output: LeRobotDataset, ep
 
 
 def main(
-    source_repo_id: str,
-    output_repo_id: str,
+    source_repo_id: str = "bpx/bpx_blocks_combined",
+    output_repo_id: str = "bpx/bpx_blocks_combined_video",
     *,
     overwrite: bool = False,
     image_writer_threads: int = 16,
     video_encode_workers: int = 3,
+    video_codec: Literal["h264", "hevc", "libsvtav1"] = "h264",
+    video_crf: int = 18,
     episode_limit: int | None = None,
     validation_samples_per_episode: int = 3,
     max_image_mae: float = 12.0,
@@ -127,6 +138,8 @@ def main(
         raise ValueError("image_writer_threads must be at least one")
     if video_encode_workers < 1:
         raise ValueError("video_encode_workers must be at least one")
+    if video_codec not in {"h264", "hevc", "libsvtav1"} or not 0 <= video_crf <= 51:
+        raise ValueError("video_codec must be h264/hevc/libsvtav1, with video_crf in [0, 51]")
     if episode_limit is not None and episode_limit < 1:
         raise ValueError("episode_limit must be at least one when provided")
     if validation_samples_per_episode < 0:
@@ -162,6 +175,8 @@ def main(
         image_writer_threads=image_writer_threads,
     )
     output.video_encode_workers = video_encode_workers
+    output.video_codec = video_codec
+    output.video_crf = video_crf
 
     writable_keys = [key for key in source.features if key not in _AUTOMATIC_FEATURES]
     source_global_index = 0
@@ -222,9 +237,29 @@ def main(
     if actual_videos != expected_videos:
         raise ValueError(f"Expected {expected_videos} MP4 files, found {actual_videos}")
 
+    # Verify every video decodes to exactly the episode's recorded frame count,
+    # in addition to the per-episode numeric equality and sampled RGB checks.
+    audit = audit_dataset(output_path, min(video_encode_workers, 8), video_check="full")
+
     source_bytes = _tree_size(source_path)
     output_bytes = _tree_size(output_path)
     ratio = output_bytes / source_bytes if source_bytes else float("nan")
+    report = {
+        "source": str(source_path), "output": str(output_path),
+        "status": "pass", "source_unchanged_by_converter": True,
+        "episodes": reloaded.num_episodes, "frames": reloaded.num_frames,
+        "videos": actual_videos, "video_codec": video_codec, "video_crf": video_crf,
+        "pixel_format": "yuv420p", "lossy_video": True,
+        "numeric_equality": "all episodes checked",
+        "image_check": "sampled RGB MAE; not pixel-exact equivalence",
+        "samples_per_episode": validation_samples_per_episode,
+        "max_image_mae": max_image_mae,
+        "source_bytes": source_bytes, "output_bytes": output_bytes,
+        "full_video_audit": audit,
+    }
+    (output_path / "transcode_validation.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     print(
         "TRANSCODE PASS: "
         f"episodes={reloaded.num_episodes}, frames={reloaded.num_frames}, videos={actual_videos}, "
