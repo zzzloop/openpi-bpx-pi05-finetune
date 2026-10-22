@@ -50,7 +50,15 @@ function dataEnvironment() {
 async function api(path, options = {}) {
   const headers = { ...options.headers };
   if (options.body) headers["Content-Type"] = "application/json";
-  const response = await fetch(path, { signal: AbortSignal.timeout(20000), ...options, headers });
+  let response;
+  try {
+    response = await fetch(path, { signal: AbortSignal.timeout(20000), ...options, headers });
+  } catch (error) {
+    if (error.name === "TimeoutError" || error.name === "AbortError") {
+      throw new Error("仪表盘后台请求超时；不是数据目录格式错误。后台训练任务不会因此自动停止。");
+    }
+    throw error;
+  }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
   return body;
@@ -191,7 +199,7 @@ function renderConfigError(error) {
   $("normReviewState").className = "bad-text";
   setBinding($("normBinding"), "bad", "Config 必须先在 OpenPI 训练配置中注册，才能计算归一化统计或训练。");
   $("flowStatus").className = "flow-status bad";
-  $("flowStatus").textContent = "Config 无法解析";
+  $("flowStatus").textContent = `Config 查询失败：${error.message}`;
 }
 
 async function loadConfigProfile() {

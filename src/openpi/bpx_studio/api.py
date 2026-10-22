@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import csv
 import dataclasses
-import importlib
 import logging
 import os
 import pathlib
@@ -30,6 +29,8 @@ from openpi.bpx_studio.commands import build_spike_job
 from openpi.bpx_studio.commands import build_train
 from openpi.bpx_studio.commands import build_validation_split
 from openpi.bpx_studio.jobs import JobManager
+from openpi.bpx_studio.config_profile import read_config_binding
+from openpi.bpx_studio.status_probe import CachedProbe
 from openpi.bpx_studio.spike_viewer import load_spike_trace
 from openpi.bpx_studio.spike_viewer import summarize_spike_report
 
@@ -263,6 +264,7 @@ def _gpu_snapshot() -> dict:
 def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root: pathlib.Path) -> FastAPI:
     web_root = pathlib.Path(__file__).with_name("web")
     manager = JobManager(state_dir)
+    gpu_probe = CachedProbe(_gpu_snapshot)
     app = FastAPI(title="OpenPI BPX Research Studio")
 
     def start(kind: str, builder):
@@ -278,7 +280,7 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
         return FileResponse(web_root / "index.html")
 
     @app.get("/healthz")
-    def health():
+    async def health():
         return {"ok": True}
 
     @app.get("/api/config")
@@ -296,14 +298,13 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
     @app.get("/api/config-profile")
     def config_profile(config_name: str = DEFAULT_CONFIG_NAME, hf_lerobot_home: str = "", validation_manifest: str = ""):
         try:
-            training_config = importlib.import_module("openpi.training.config")
-            selected = training_config.get_config(config_name)
+            selected = read_config_binding(project_root, config_name)
             if validation_manifest:
                 from openpi.training.validation_split import configure
                 selected = configure(dataclasses.replace(selected, validation_manifest=validation_manifest))
             lerobot_root = pathlib.Path(hf_lerobot_home or data_root / "lerobot").expanduser().resolve()
             return _config_profile(project_root=project_root, lerobot_root=lerobot_root, train_config=selected)
-        except (ImportError, OSError, ValueError, KeyError) as error:
+        except (OSError, SyntaxError, ValueError, KeyError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.get("/api/checkpoints")
@@ -331,7 +332,7 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
             disk = {"path": str(target.resolve()), "total": usage.total, "used": usage.used, "free": usage.free}
         except OSError as error:
             disk = {"path": str(target), "error": str(error)}
-        return {"disk": {**disk, "requested_path": requested}, **_gpu_snapshot()}
+        return {"disk": {**disk, "requested_path": requested}, **gpu_probe.snapshot()}
 
     @app.get("/api/spikes/report")
     def spike_report(
