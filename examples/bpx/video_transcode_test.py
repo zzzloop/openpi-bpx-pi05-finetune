@@ -99,5 +99,6 @@ def test_offline_launcher_uses_server_environment_and_scratch_cache():
     assert ".venv/bin/python" in launcher
     assert "/scratch/bpx_datasets" in launcher
     assert "HF_DATASETS_CACHE" in launcher
-    assert "--image-writer-threads 32 --video-encode-workers 3" in launcher
+    assert "-m openpi.bpx_studio.video_transcoder" in launcher
+    assert "OMP_NUM_THREADS=1" in launcher
     assert "uv run" not in launcher and "uv sync" not in launcher and "pip install" not in launcher

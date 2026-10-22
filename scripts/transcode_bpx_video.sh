@@ -17,8 +17,14 @@ export HF_HOME="${HF_HOME:-${BPX_STORAGE_ROOT}/cache/huggingface}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${BPX_STORAGE_ROOT}/cache/huggingface/datasets}"
 export TMPDIR="${TMPDIR:-${BPX_STORAGE_ROOT}/tmp}"
 export PYTHONUNBUFFERED=1
+# Episode workers do their own bounded decoding/encoding; avoid nested BLAS pools.
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
 
 mkdir -p -- "${HF_HOME}" "${HF_DATASETS_CACHE}" "${TMPDIR}"
 cd -- "${BPX_PROJECT_ROOT}"
-exec "${BPX_PYTHON}" examples/bpx/transcode_bpx_lerobot_images_to_video.py \
-  --image-writer-threads 32 --video-encode-workers 3 "$@"
+echo "[BOOT] Offline streaming converter; Python: ${BPX_PYTHON}"
+echo "[BOOT] LeRobot data root: ${HF_LEROBOT_HOME}; no Hugging Face dataset initialization"
+exec "${BPX_PYTHON}" -u -m openpi.bpx_studio.video_transcoder "$@"
