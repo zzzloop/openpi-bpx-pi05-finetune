@@ -13,6 +13,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
+from openpi.training.loss_trends import robust_trend
 
 plt.switch_backend("Agg")
 
@@ -31,6 +32,8 @@ _SCALAR_COLUMNS = (
     "learning_rate",
     "steps_per_sec",
     "samples_per_sec",
+    "train_eval_loss", "val_loss", "generalization_gap", "val_stderr",
+    "best_validation_step", "best_validation_loss", "overfit_warning", "evaluation_seconds",
 )
 
 
@@ -83,6 +86,15 @@ class TrainingMonitor:
         self.jsonl_path = self.output_dir / "metrics.jsonl"
         self.csv_path = self.output_dir / "metrics.csv"
         self._history = self._load_history()
+        # Upgrade old CSV headers once, preserving original values.
+        if self._history and self.csv_path.is_file():
+            with self.csv_path.open(encoding="utf-8") as stream:
+                columns = next(csv.reader(stream), [])
+            if columns != list(_SCALAR_COLUMNS):
+                with self.csv_path.open("w", newline="", encoding="utf-8") as stream:
+                    writer = csv.DictWriter(stream, fieldnames=_SCALAR_COLUMNS, extrasaction="ignore")
+                    writer.writeheader()
+                    writer.writerows(self._history)
         self._start_time = time.monotonic()
         self._last_log_time = self._start_time
         self._last_log_step: int | None = None
@@ -162,7 +174,10 @@ class TrainingMonitor:
         steps = np.asarray([record["step"] for record in self._history], dtype=np.int64)
         loss = self._series("loss")
         axes[0, 0].plot(steps, loss, alpha=0.35, label="interval mean")
-        axes[0, 0].plot(steps, _moving_average(loss, 10), linewidth=2, label="10-point moving mean")
+        trend, outliers = robust_trend(loss)
+        axes[0, 0].plot(steps, trend, linewidth=2, label="Hampel + EMA (display only)")
+        if outliers.any():
+            axes[0, 0].scatter(steps[outliers], loss[outliers], s=10, color="red", label="raw peaks retained")
         loss_min, loss_max = self._series("loss_min"), self._series("loss_max")
         if np.isfinite(loss_min).any() and np.isfinite(loss_max).any():
             axes[0, 0].fill_between(steps, loss_min, loss_max, alpha=0.15, label="mean interval min/max")
@@ -175,7 +190,8 @@ class TrainingMonitor:
                 axes[0, 1].plot(steps, values, label=label)
         axes[0, 1].set_yscale("log")
         axes[0, 1].set_title("Gradient / update norm (log scale)")
-        axes[0, 1].legend()
+        if axes[0, 1].lines:
+            axes[0, 1].legend()
 
         axes[0, 2].plot(steps, self._series("param_norm"))
         axes[0, 2].set_title("Trainable kernel parameter norm")
@@ -201,7 +217,41 @@ class TrainingMonitor:
         temporary_latest = latest.with_name(f"{latest.name}.partial")
         temporary_latest.write_bytes(snapshot.read_bytes())
         os.replace(temporary_latest, latest)
-        return [snapshot, latest]
+        paths = [snapshot, latest]
+        figure, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
+        axes[0].plot(steps, loss, linewidth=1, alpha=0.65)
+        axes[0].set_title("Raw training loss: all recorded peaks retained")
+        axes[1].plot(steps, trend, color="darkorange", linewidth=2)
+        axes[1].set_title(f"Display-only robust trend ({int(outliers.sum())} outliers; independent y scale)")
+        for axis in axes:
+            axis.grid(alpha=0.25)
+            axis.set_xlabel("step")
+        trend_path = self.output_dir / "loss_trend_latest.png"
+        self._save_figure(figure, trend_path)
+        paths.append(trend_path)
+        comparisons = [r for r in self._history if "val_loss" in r]
+        if comparisons:
+            figure, axes = plt.subplots(1, 2, figsize=(13, 4.5), constrained_layout=True)
+            xs = [r["step"] for r in comparisons]
+            for key, label in (("train_eval_loss", "train reference / eval mode"), ("val_loss", "held-out validation")):
+                axes[0].plot(xs, [r[key] for r in comparisons], marker=".", label=label)
+            val = np.asarray([r["val_loss"] for r in comparisons])
+            se = np.asarray([r.get("val_stderr", 0) for r in comparisons])
+            axes[0].fill_between(xs, val-2*se, val+2*se, alpha=0.12, label="validation +/-2 batch SE")
+            best = comparisons[int(np.argmin(val))]
+            axes[0].axvline(best["step"], linestyle="--", alpha=0.5, label=f"best evaluated step {best['step']}")
+            axes[0].set_title("Comparable losses: same mode, fixed samples/noise")
+            axes[0].legend(fontsize=8)
+            axes[1].plot(xs, [r["generalization_gap"] for r in comparisons], color="purple")
+            axes[1].axhline(0, color="grey", linewidth=1)
+            axes[1].set_title("Validation - train reference (raw, not despiked)")
+            for axis in axes:
+                axis.grid(alpha=0.25)
+                axis.set_xlabel("step")
+            path = self.output_dir / "generalization_latest.png"
+            self._save_figure(figure, path)
+            paths.append(path)
+        return paths
 
     def _series(self, key: str) -> np.ndarray:
         return np.asarray([record.get(key, np.nan) for record in self._history], dtype=np.float64)

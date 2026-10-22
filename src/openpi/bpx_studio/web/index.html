@@ -6,6 +6,7 @@
     <title>OpenPI · BPX Research Studio</title>
     <link rel="stylesheet" href="/static/app.css" />
     <link rel="stylesheet" href="/static/guidance.css" />
+    <link rel="stylesheet" href="/static/validation.css" />
   <link rel="stylesheet" href="/static/workspace.css" />
   </head>
   <body>
@@ -61,7 +62,17 @@
         <label class="wide">LeRobot 源目录<input id="exportSource" /></label><label class="wide">HDF5 输出目录<input id="exportOutput" /></label><label>并行 episode<input id="exportWorkers" type="number" value="4" /></label><label>压缩<select id="exportCompression"><option>gzip</option><option>lzf</option><option>none</option></select></label><label>gzip level<input id="compressionLevel" type="number" value="4" /></label>
       </div><button id="startExport" class="primary">导出 HDF5</button></section>
 
-      <section class="card panel" data-panel="train"><div class="section-title"><h2><em>05</em>OpenPI 训练</h2><span>关键参数全部显式记录</span></div><div class="grid four">
+      <section class="card panel" data-panel="train"><div class="section-title"><h2><em>05</em>OpenPI 训练</h2><span>关键参数全部显式记录</span></div>
+        <details class="validation-setup" open><summary>训练 / 验证对比与过拟合观察</summary><p>新实验建议先生成完整 episode 分组划分，再重新计算训练部分的归一化。已有模型看过的数据不能充当独立验证集。验证只做前向计算，不自动停训。</p><div class="grid three">
+          <label class="wide">划分清单输出<input id="validationOutput" /><small>生成后不可覆盖；训练与归一化使用同一份清单。</small></label>
+          <label>验证分组比例<input id="validationFraction" type="number" min="0.01" max="0.49" step="0.01" value="0.1" /></label>
+          <label class="wide">源转换 manifest（增强数据必须填写）<input id="validationSource" placeholder="例如 …/bpx_pi05_multitask_v2/manifests/multitask_v2.json" /></label>
+          <label>数据来源<select id="validationGrouping"><option value="manifest">按源 manifest 绑定增强副本</option><option value="independent">确认没有增强/重复示教，每条独立</option></select></label>
+        </div><button id="createValidationSplit">生成分组验证清单</button><div class="grid three">
+          <label class="wide">启用的划分清单<input id="validationManifest" placeholder="留空保持旧实验行为；生成后填入完整路径" /><small>影响训练数据选择和统计路径；已有实验续训必须保持不变。</small></label>
+          <label>验证间隔 steps<input id="validationInterval" type="number" value="1000" min="100" step="100" /></label>
+          <label>每侧固定评估 batches<input id="validationBatches" type="number" value="16" min="1" max="256" /><small>batch 仍沿用训练值；数量越大越稳，但耗时增加。</small></label>
+        </div><p id="validationHint">未启用独立验证；仅显示训练 loss。原始数值始终保存，趋势去毛刺只影响绘图。</p></details><div class="grid four">
         <label class="wide">Config name<input id="trainConfig" list="bpxConfigNames" /></label><label class="wide">Experiment name<input id="expName" /><button id="newExperiment" type="button">生成未使用的实验名</button></label><label>CUDA 设备<input id="cudaDevices" value="2,3" /></label><label>XLA 显存比例<input id="memoryFraction" value="0.96" /></label><label>Global batch<input id="batchSize" type="number" value="2" /></label><label>FSDP devices<input id="fsdpDevices" type="number" value="2" /></label><label>训练 steps<input id="trainSteps" type="number" value="200000" /></label><label>保存间隔<input id="saveInterval" type="number" value="5000" /></label><label>长期保留间隔<input id="keepPeriod" type="number" value="25000" /></label><label>模式<select id="trainMode"><option value="overwrite">新实验 / overwrite</option><option value="resume">断点续训 / resume</option></select></label>
         <label class="wide readonly-field">训练实际读取的数据集 <span class="lock">CONFIG 锁定</span><input id="trainDatasetSource" readonly /><small>必须与本次归一化所读取的数据集一致。</small></label><label class="wide readonly-field">训练加载的归一化统计 <span class="lock">CONFIG 锁定</span><input id="trainStatsSource" readonly /><small>只是小型统计 JSON，不包含图像或 episode 数据。</small></label>
       </div><div id="trainPurpose" class="config-note">—</div><button id="startTrain" class="primary">启动训练</button></section>
@@ -70,7 +81,10 @@
         <label class="wide">Config name（由 checkpoint 自动匹配）<input id="serveConfig" readonly /></label><label class="wide">全部完整 checkpoint<select id="serveCheckpoint"><option value="">正在扫描…</option></select></label><label>CUDA 设备<input id="serveCudaDevices" value="2,3" /></label><label>XLA 显存比例<input id="serveMemoryFraction" value="0.96" /></label>
       </div><div class="buttons"><button id="refreshCheckpoints">刷新 Checkpoint</button><button id="startServe" class="primary">启动模型推理</button><button id="stopServe" class="danger">停止模型推理</button></div></section>
 
-      <section class="monitor"><article class="card jobs"><div class="title"><h2>任务记录</h2><button id="refreshJobs">刷新</button></div><div id="jobList">暂无任务</div></article><article class="card details"><div class="title"><div><small id="selectedKind">NO JOB</small><h2 id="selectedTitle">选择任务查看详情</h2></div><button id="cancelJob" class="danger" hidden>终止任务</button></div><div class="progress-line"><span id="progressText">0 / 0</span><strong id="progressPercent">0%</strong></div><progress id="progressBar" max="100" value="0"></progress><div class="metrics"><div>LOSS<strong id="metricLoss">—</strong></div><div>GRAD NORM<strong id="metricGrad">—</strong></div><div>LEARNING RATE<strong id="metricLr">—</strong></div><div>STATUS<strong id="metricStatus">—</strong></div></div><div class="charts"><svg id="lossChart" viewBox="0 0 600 170"></svg><svg id="normChart" viewBox="0 0 600 170"></svg></div><details><summary>受控命令与环境</summary><pre id="commandText">—</pre></details><pre id="jobLog" class="log">任务日志将在这里显示。</pre></article></section>
+      <section class="monitor"><article class="card jobs"><div class="title"><h2>任务记录</h2><button id="refreshJobs">刷新</button></div><div id="jobList">暂无任务</div></article><article class="card details"><div class="title"><div><small id="selectedKind">NO JOB</small><h2 id="selectedTitle">选择任务查看详情</h2></div><button id="cancelJob" class="danger" hidden>终止任务</button></div><div class="progress-line"><span id="progressText">0 / 0</span><strong id="progressPercent">0%</strong></div><progress id="progressBar" max="100" value="0"></progress><div class="metrics"><div>LOSS<strong id="metricLoss">—</strong></div><div>GRAD NORM<strong id="metricGrad">—</strong></div><div>LEARNING RATE<strong id="metricLr">—</strong></div><div>STATUS<strong id="metricStatus">—</strong></div></div>
+        <div class="validation-metrics"><div>训练参考 loss（eval）<strong id="metricTrainEval">—</strong></div><div>验证 loss<strong id="metricValidation">—</strong></div><div>验证 − 训练<strong id="metricGap">—</strong></div><div>最佳验证 step<strong id="metricBestStep">—</strong></div></div>
+        <p id="overfitHint" class="config-note">等待独立验证指标</p><div class="chart-toolbar"><label>训练曲线<select id="lossView"><option value="trend">稳健去毛刺趋势（Hampel + EMA）</option><option value="raw">原始训练 loss（保留全部峰值）</option></select></label><span id="lossPeakCount"></span></div>
+        <div class="charts"><svg id="lossChart" viewBox="0 0 600 170"></svg><svg id="normChart" viewBox="0 0 600 170"></svg></div><h3>训练参考 / 验证 loss（同一 eval 模式，原始值）</h3><svg id="validationChart" viewBox="0 0 600 230"></svg><details><summary>受控命令与环境</summary><pre id="commandText">—</pre></details><pre id="jobLog" class="log">任务日志将在这里显示。</pre></article></section>
     </main><datalist id="bpxConfigNames"></datalist><div id="toast"></div><script src="/static/app.js"></script>
   </body>
 </html>

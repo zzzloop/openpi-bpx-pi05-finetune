@@ -13,6 +13,8 @@ import torch
 
 import openpi.models.model as _model
 import openpi.training.config as _config
+import openpi.training.validation_split as _validation_split
+from openpi.training.validation import reference_frame_indices
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
 
@@ -145,6 +147,15 @@ def create_torch_dataset(
         },
     )
 
+    if data_config.episode_indices is not None:
+        # Query the original LeRobot dataset so chunk padding retains episode boundaries.
+        indices = []
+        for episode_index in data_config.episode_indices:
+            start = int(dataset.episode_data_index["from"][episode_index])
+            end = int(dataset.episode_data_index["to"][episode_index])
+            indices.extend(range(start, end))
+        dataset = torch.utils.data.Subset(dataset, indices)
+
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
 
@@ -180,7 +191,8 @@ def create_task_balanced_sampler(
         raise ValueError("Task balancing requires a real LeRobot repo_id")
     metadata = lerobot_dataset.LeRobotDatasetMetadata(data_config.repo_id)
     episode_inventory: list[tuple[str, int]] = []
-    for episode_index in range(metadata.total_episodes):
+    selected = data_config.episode_indices
+    for episode_index in (range(metadata.total_episodes) if selected is None else selected):
         episode = metadata.episodes[episode_index]
         tasks = episode.get("tasks", [])
         if len(tasks) != 1:
@@ -282,6 +294,7 @@ def create_data_loader(
     num_batches: int | None = None,
     skip_norm_stats: bool = False,
     framework: Literal["jax", "pytorch"] = "jax",
+    split: Literal["train", "validation", "train_reference"] = "train",
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training.
 
@@ -293,10 +306,14 @@ def create_data_loader(
         skip_norm_stats: Whether to skip data normalization.
         framework: The framework to use ("jax" or "pytorch").
     """
+    config = _validation_split.configure(config)
     data_config = config.data.create(config.assets_dirs, config.model)
+    data_config = _validation_split.select_data_config(config, data_config, split)
     logging.info(f"data_config: {data_config}")
 
     if data_config.rlds_data_dir is not None:
+        if config.validation_manifest:
+            raise ValueError("Grouped validation currently supports LeRobot datasets, not RLDS")
         return create_rlds_data_loader(
             data_config,
             action_horizon=config.model.action_horizon,
@@ -319,6 +336,8 @@ def create_data_loader(
         seed=config.seed,
         skip_norm_stats=skip_norm_stats,
         framework=framework,
+        sample_limit=config.validation_batches * config.batch_size if split != "train" else None,
+        sample_seed=config.validation_seed,
     )
 
 
@@ -335,6 +354,8 @@ def create_torch_data_loader(
     num_workers: int = 0,
     seed: int = 0,
     framework: str = "jax",
+    sample_limit: int | None = None,
+    sample_seed: int = 42,
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training.
 
@@ -355,6 +376,19 @@ def create_torch_data_loader(
     """
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+    if sample_limit is not None:
+        count = min(len(dataset), sample_limit)
+        count -= count % batch_size
+        if count < batch_size:
+            raise ValueError("Each evaluation split needs at least one complete batch")
+        metadata = lerobot_dataset.LeRobotDatasetMetadata(data_config.repo_id)
+        selected = data_config.episode_indices
+        episode_ids = range(metadata.total_episodes) if selected is None else selected
+        inventory = [(metadata.episodes[i]["tasks"][0], int(metadata.episodes[i]["length"])) for i in episode_ids]
+        indices = reference_frame_indices(inventory, count, sample_seed)
+        dataset = torch.utils.data.Subset(dataset, indices)
+        num_batches = count // batch_size
+        num_workers = 0  # Cache once on the host; no extra persistent decoder workers.
 
     # Use TorchDataLoader for both frameworks
     # For PyTorch DDP, create DistributedSampler and divide batch size by world size

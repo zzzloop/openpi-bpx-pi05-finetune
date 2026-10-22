@@ -17,6 +17,7 @@ import uuid
 
 from openpi.bpx_studio.commands import CommandSpec
 from openpi.bpx_studio.progress import parse_progress_line
+from openpi.training.loss_trends import robust_trend
 
 _ACTIVE = {"queued", "running", "cancelling"}
 
@@ -187,7 +188,12 @@ class JobManager:
         if not path.is_file():
             return []
         lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
-        return [json.loads(line) for line in lines if line.strip()]
+        records = [json.loads(line) for line in lines if line.strip()]
+        train = [r for r in records if "loss" in r.get("metrics", {})]
+        trend, outliers = robust_trend([r["metrics"]["loss"] for r in train])
+        for record, value, outlier in zip(train, trend, outliers, strict=True):
+            record["display"] = {"loss_trend": float(value), "loss_outlier": bool(outlier)}
+        return records
 
     def _start_watcher(self, job_id: str) -> None:
         threading.Thread(target=self._watch, args=(job_id,), daemon=True, name=f"bpx-job-{job_id}").start()

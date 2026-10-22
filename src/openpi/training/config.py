@@ -96,6 +96,9 @@ class DataConfig:
     # This is useful for multi-task datasets whose episode/frame counts are imbalanced.
     balance_by_task: bool = False
 
+    # Whole-episode selection used by immutable grouped train/validation splits.
+    episode_indices: tuple[int, ...] | None = None
+
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
     # Action space for DROID dataset.
@@ -561,6 +564,12 @@ class TrainConfig:
     # Number of workers to use for the data loader. Increasing this number will speed up data loading but
     # will increase memory and CPU usage.
     num_workers: int = 2
+
+    # Opt-in grouped validation. Existing runs without a manifest are unchanged.
+    validation_manifest: str | None = None
+    validation_interval: int = 1000
+    validation_batches: int = 16
+    validation_seed: int = 42
     # Number of train steps (batches) to run.
     num_train_steps: int = 30_000
 

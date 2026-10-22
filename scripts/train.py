@@ -1,7 +1,11 @@
 import dataclasses
 import functools
+import hashlib
+import json
 import logging
+import pathlib
 import platform
+import time
 from typing import Any
 
 import etils.epath as epath
@@ -27,6 +31,8 @@ import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
+import openpi.training.validation as _validation
+import openpi.training.validation_split as _validation_split
 
 
 def init_logging():
@@ -203,7 +209,16 @@ def train_step(
     return new_state, info
 
 
+def eval_step(model_def, params, rng, batch):
+    """Same evaluation mode for train-reference and holdout; no autodiff/updates."""
+    model = nnx.merge(model_def, params)
+    model.eval()
+    observation, actions = batch
+    return jnp.mean(model.compute_loss(rng, observation, actions, train=False))
+
+
 def main(config: _config.TrainConfig):
+    config = _validation_split.configure(config)
     init_logging()
     logging.info(f"Running on: {platform.node()}")
 
@@ -228,6 +243,8 @@ def main(config: _config.TrainConfig):
         resume=config.resume,
     )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+    if resuming and not config.validation_manifest and (config.checkpoint_dir / "monitoring/validation_protocol.json").exists():
+        raise ValueError("This experiment uses held-out validation; resume with the same validation manifest")
 
     data_loader = _data_loader.create_data_loader(
         config,
@@ -282,6 +299,55 @@ def main(config: _config.TrainConfig):
 
     infos = []
 
+    evaluation_history = None
+    evaluation_batches = {}
+    if config.validation_manifest:
+        if config.validation_interval < 1 or config.validation_batches < 1:
+            raise ValueError("Validation interval and batches must be positive")
+        if config.validation_interval % config.log_interval:
+            raise ValueError("Validation interval must be divisible by log_interval")
+        identity = {"split_digest": _validation_split.split_digest(config.validation_manifest),
+                    "seed": config.validation_seed, "batches": config.validation_batches,
+                    "batch_size": config.batch_size, "mode": "current_params_train_false",
+                    "config": config.name, "action_horizon": config.model.action_horizon,
+                    "sampling": "task_stratified_without_replacement"}
+        stats_path = pathlib.Path(config.assets_dirs) / config.data.repo_id / "norm_stats.json"
+        identity["norm_stats_sha256"] = hashlib.sha256(stats_path.read_bytes()).hexdigest()
+        evaluation_history = _validation.EvaluationHistory(
+            pathlib.Path(config.checkpoint_dir) / "monitoring", identity, start_step=start_step, resume=resuming)
+        split_copy = pathlib.Path(config.checkpoint_dir) / "monitoring" / "validation_split.json"
+        split_copy.write_text(json.dumps(_validation_split.load_split(config.validation_manifest),
+                                        ensure_ascii=False, indent=2), encoding="utf-8")
+        for split in ("train_reference", "validation"):
+            loader = _data_loader.create_data_loader(config, sharding=data_sharding, split=split)
+            # Bound host RAM and avoid holding validation images on the GPUs between evaluations.
+            evaluation_batches[split] = [jax.tree.map(np.asarray, jax.device_get(item)) for item in loader]
+        peval = jax.jit(functools.partial(eval_step, train_state.model_def),
+                       in_shardings=(train_state_sharding.params, replicated_sharding, data_sharding),
+                       out_shardings=replicated_sharding)
+
+    def run_evaluation(step):
+        started = time.monotonic()
+        results = {}
+        for split, batches in evaluation_batches.items():
+            def evaluate(index, host_batch):
+                key = jax.random.fold_in(jax.random.key(config.validation_seed), index)
+                device_batch = jax.tree.map(
+                    lambda x: jax.make_array_from_process_local_data(data_sharding, x), host_batch)
+                with sharding.set_mesh(mesh):
+                    return jax.device_get(peval(train_state.params, key, device_batch))
+            results[split] = _validation.evaluate_batches(batches, evaluate)
+        train_loss, train_se = results["train_reference"]
+        val_loss, val_se = results["validation"]
+        record = evaluation_history.append(
+            step, train_loss, val_loss, train_stderr=train_se, val_stderr=val_se,
+            seconds=time.monotonic() - started,
+            checkpoint_saved=((step % config.save_interval == 0 and step > start_step)
+                              or step == config.num_train_steps - 1))
+        return {key: value for key, value in record.items()
+                if key in ("train_eval_loss", "val_loss", "generalization_gap", "val_stderr",
+                           "best_validation_step", "best_validation_loss", "overfit_warning", "evaluation_seconds")}
+
     def flush_metrics(step: int, visualized_batch, *, final: bool = False) -> None:
         nonlocal infos
         if not infos:
@@ -292,6 +358,8 @@ def main(config: _config.TrainConfig):
             for key, value in stacked_infos.items()
         }
         reduced_info = jax.device_get(reduced_info)
+        if evaluation_history is not None and (step % config.validation_interval == 0 or final):
+            reduced_info.update(run_evaluation(step))
         scalar_info = {key: value for key, value in reduced_info.items() if np.asarray(value).ndim == 0}
         info_str = ", ".join(f"{key}={float(value):.4g}" for key, value in scalar_info.items())
         pbar.write(f"Step {step}: {info_str}")
@@ -334,7 +402,7 @@ def main(config: _config.TrainConfig):
             train_state, info = ptrain_step(train_rng, train_state, batch)
         infos.append(info)
         if step % config.log_interval == 0:
-            flush_metrics(step, last_trained_batch)
+            flush_metrics(step, last_trained_batch, final=step == config.num_train_steps - 1)
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:

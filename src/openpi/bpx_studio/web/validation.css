@@ -1,0 +1,10 @@
+.validation-setup { padding: 18px; border: 1px solid #d9e4f2; border-radius: 12px; background: #f8fbff; margin-bottom: 20px; }
+.validation-setup summary { font-weight: 750; color: #2457e6; cursor: pointer; }
+.validation-setup p { font-size: 13px; color: #52647d; line-height: 1.7; }
+.validation-setup button { margin: 14px 0; }
+.validation-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.validation-metrics > div { padding: 12px; background: #f0f5ff; border-radius: 10px; font-size: 11px; color: #52647d; }
+.validation-metrics strong { display: block; font-size: 16px; color: #152b4b; margin-top: 8px; }
+.chart-toolbar { display: flex; align-items: center; gap: 16px; font-size: 12px; margin: 14px 0; color: #52647d; }
+#validationChart { width: 100%; border: 1px solid #d9e4f2; border-radius: 12px; background: #fbfdff; }
+@media (max-width: 900px) { .validation-metrics { grid-template-columns: 1fr 1fr; } .chart-toolbar { display: block; } }

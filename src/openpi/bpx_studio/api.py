@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import importlib
 import logging
 import os
@@ -27,6 +28,7 @@ from openpi.bpx_studio.commands import build_normalize
 from openpi.bpx_studio.commands import build_policy_serve
 from openpi.bpx_studio.commands import build_spike_job
 from openpi.bpx_studio.commands import build_train
+from openpi.bpx_studio.commands import build_validation_split
 from openpi.bpx_studio.jobs import JobManager
 from openpi.bpx_studio.spike_viewer import load_spike_trace
 from openpi.bpx_studio.spike_viewer import summarize_spike_report
@@ -49,6 +51,15 @@ class DataEnvironment(BaseModel):
     hf_datasets_cache: str = ""
     tmpdir: str = ""
     uv_cache_dir: str = ""
+    validation_manifest: str = ""
+
+
+class ValidationSplitRequest(BaseModel):
+    dataset_root: str
+    output_path: str
+    source_manifest: str = ""
+    independent_episodes: bool = False
+    fraction: float = Field(default=0.1, gt=0, lt=0.5)
 
 
 class AuditRequest(BaseModel):
@@ -93,6 +104,8 @@ class TrainRequest(DataEnvironment):
     save_interval: int = Field(default=5000, ge=1)
     keep_period: int = Field(default=25000, ge=1)
     mode: Literal["overwrite", "resume"] = "overwrite"
+    validation_interval: int = Field(default=1000, ge=1)
+    validation_batches: int = Field(default=16, ge=1, le=256)
 
 
 class ServeRequest(BaseModel):
@@ -126,6 +139,7 @@ def default_paths(data_root: pathlib.Path) -> dict[str, str]:
         "spike_scan_report": str(root / "reports" / f"{DEFAULT_DATASET_NAME}_spikes_scan.json"),
         "spike_clean_report": str(root / "reports" / f"{DEFAULT_DATASET_NAME}_spikes_clean.json"),
         "hdf5_export": str(root / "exports" / f"{DEFAULT_DATASET_NAME}_hdf5"),
+        "validation_split": str(root / "reports" / "validation_split_v1.json"),
     }
 
 
@@ -280,13 +294,16 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
         }
 
     @app.get("/api/config-profile")
-    def config_profile(config_name: str = DEFAULT_CONFIG_NAME, hf_lerobot_home: str = ""):
+    def config_profile(config_name: str = DEFAULT_CONFIG_NAME, hf_lerobot_home: str = "", validation_manifest: str = ""):
         try:
             training_config = importlib.import_module("openpi.training.config")
             selected = training_config.get_config(config_name)
+            if validation_manifest:
+                from openpi.training.validation_split import configure
+                selected = configure(dataclasses.replace(selected, validation_manifest=validation_manifest))
             lerobot_root = pathlib.Path(hf_lerobot_home or data_root / "lerobot").expanduser().resolve()
             return _config_profile(project_root=project_root, lerobot_root=lerobot_root, train_config=selected)
-        except (ImportError, ValueError) as error:
+        except (ImportError, OSError, ValueError, KeyError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.get("/api/checkpoints")
@@ -394,6 +411,10 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
     @app.post("/api/jobs/normalize")
     def start_normalize(request: NormalizeRequest):
         return start("normalize", lambda: build_normalize(request.model_dump()))
+
+    @app.post("/api/jobs/validation-split")
+    def start_validation_split(request: ValidationSplitRequest):
+        return start("validation_split", lambda: build_validation_split(project_root, request.model_dump()))
 
     @app.post("/api/jobs/export/hdf5")
     def start_hdf5_export(request: Hdf5ExportRequest):

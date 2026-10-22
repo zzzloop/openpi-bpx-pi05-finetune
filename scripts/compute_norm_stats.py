@@ -5,6 +5,8 @@ will compute the mean and standard deviation of the data in the dataset and save
 to the config assets directory.
 """
 
+import dataclasses
+
 import numpy as np
 import tqdm
 import tyro
@@ -13,6 +15,7 @@ import openpi.models.model as _model
 import openpi.shared.normalize as normalize
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
+import openpi.training.validation_split as _validation_split
 import openpi.transforms as transforms
 
 
@@ -93,6 +96,7 @@ def main(
     max_frames: int | None = None,
     *,
     num_workers: int | None = None,
+    validation_manifest: str | None = None,
 ):
     """Compute normalization statistics for a training config.
 
@@ -105,10 +109,12 @@ def main(
             frames, batch size, transforms, or statistics algorithm.
     """
     config = _config.get_config(config_name)
+    config = _validation_split.configure(dataclasses.replace(config, validation_manifest=validation_manifest))
     effective_num_workers = config.num_workers if num_workers is None else num_workers
     if effective_num_workers < 0:
         raise ValueError("num_workers must be non-negative")
     data_config = config.data.create(config.assets_dirs, config.model)
+    data_config = _validation_split.select_data_config(config, data_config)
 
     if data_config.rlds_data_dir is not None:
         data_loader, num_batches = create_rlds_dataloader(

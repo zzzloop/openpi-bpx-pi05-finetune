@@ -176,7 +176,8 @@ def build_normalize(values: Mapping[str, object]) -> CommandSpec:
     workers = _positive(int(values.get("workers", 32)), "workers", maximum=256)
     env = _data_environment({key: str(value) for key, value in values.items()})
     return CommandSpec(
-        argv=("uv", "run", "scripts/compute_norm_stats.py", "--config-name", config, "--num-workers", str(workers)),
+        argv=("uv", "run", "scripts/compute_norm_stats.py", "--config-name", config, "--num-workers", str(workers),
+              *_validation_arguments(values, normalize=True)),
         cwd=root,
         env=env,
     )
@@ -224,11 +225,49 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
             f"--save-interval={save_interval}",
             f"--keep-period={keep_period}",
             f"--{mode}",
+            *_validation_arguments(values),
         ),
         cwd=root,
         env=env,
         total_units=steps,
     )
+
+
+def _validation_arguments(values, *, normalize=False):
+    manifest = str(values.get("validation_manifest", "")).strip()
+    if not manifest:
+        return ()
+    path = pathlib.Path(manifest).expanduser().resolve()
+    from openpi.training.validation_split import load_split
+    load_split(path)
+    if normalize:
+        return ("--validation-manifest", str(path))
+    interval = _positive(int(values.get("validation_interval", 1000)), "验证间隔")
+    batches = _positive(int(values.get("validation_batches", 16)), "验证 batches", maximum=256)
+    return (f"--validation-manifest={path}", f"--validation-interval={interval}", f"--validation-batches={batches}")
+
+
+def build_validation_split(project_root: pathlib.Path, values: Mapping[str, object]) -> CommandSpec:
+    dataset = _existing_directory(str(values["dataset_root"]), "LeRobot 数据集")
+    output = _output_path(str(values["output_path"]), "验证划分清单")
+    if output.exists():
+        raise ValueError("验证清单已存在，请复用该清单或更换文件名，不要覆盖")
+    fraction = float(values.get("fraction", 0.1))
+    if not 0 < fraction < 0.5:
+        raise ValueError("验证比例必须在 0 到 0.5 之间")
+    argv = [sys.executable, "-m", "openpi.training.validation_split", "--dataset-root", str(dataset),
+            "--output", str(output), "--fraction", str(fraction)]
+    source = str(values.get("source_manifest", "")).strip()
+    if source:
+        path = pathlib.Path(source).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"源转换 manifest 不存在: {path}")
+        argv.extend(("--source-manifest", str(path)))
+    elif values.get("independent_episodes", False):
+        argv.append("--independent-episodes")
+    else:
+        raise ValueError("增强数据必须提供源转换 manifest；无增强数据才可确认 episode 相互独立")
+    return CommandSpec(argv=tuple(argv), cwd=project_root)
 
 
 def build_policy_serve(values: Mapping[str, object]) -> CommandSpec:

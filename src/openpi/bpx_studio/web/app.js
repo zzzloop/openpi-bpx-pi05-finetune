@@ -7,6 +7,8 @@ const stored = [
   "exportOutput", "exportWorkers", "exportCompression", "compressionLevel", "trainConfig", "expName",
   "cudaDevices", "memoryFraction", "batchSize", "fsdpDevices", "trainSteps", "saveInterval", "keepPeriod",
   "trainMode", "serveConfig", "serveCheckpoint", "serveCudaDevices", "serveMemoryFraction",
+  "validationManifest", "validationOutput", "validationSource", "validationGrouping", "validationFraction",
+  "validationInterval", "validationBatches", "lossView",
 ];
 
 let selectedJob = null;
@@ -17,6 +19,8 @@ let currentSpikeReportPath = "";
 let spikeReportOffset = 0;
 const spikePageSize = 100;
 let lastAutoLoadedSpikeJob = "";
+let pendingValidation = null;
+let selectedMetrics = [];
 
 function value(id) {
   return $(id).value.trim();
@@ -35,6 +39,7 @@ function save() {
 function dataEnvironment() {
   return {
     hf_lerobot_home: value("hfLerobotHome"),
+    validation_manifest: value("validationManifest"),
     hf_home: value("hfHome"),
     hf_datasets_cache: value("hfDatasetsCache"),
     tmpdir: value("tmpdir"),
@@ -195,6 +200,7 @@ async function loadConfigProfile() {
   const query = new URLSearchParams({
     config_name: configName,
     hf_lerobot_home: value("hfLerobotHome"),
+    validation_manifest: value("validationManifest"),
   });
   try {
     renderConfigProfile(await api(`/api/config-profile?${query}`));
@@ -433,6 +439,7 @@ $("startNormalize").onclick = async () => {
   start("/api/jobs/normalize", {
     ...dataEnvironment(), openpi_root: value("openpiRoot"), config_name: value("normConfig"),
     workers: num("normWorkers"),
+    validation_manifest: value("validationManifest"),
   });
 };
 $("startExport").onclick = () => start("/api/jobs/export/hdf5", {
@@ -448,8 +455,30 @@ $("startTrain").onclick = async () => {
     memory_fraction: num("memoryFraction"), batch_size: num("batchSize"), num_train_steps: num("trainSteps"),
     fsdp_devices: num("fsdpDevices"), save_interval: num("saveInterval"), keep_period: num("keepPeriod"),
     mode: value("trainMode"),
+    validation_manifest: value("validationManifest"), validation_interval: num("validationInterval"),
+    validation_batches: num("validationBatches"),
   });
 };
+$("createValidationSplit").onclick = async () => {
+  try {
+    const output = value("validationOutput");
+    const result = await api("/api/jobs/validation-split", {method: "POST", body: JSON.stringify({
+      dataset_root: value("trainDatasetSource"), output_path: output,
+      source_manifest: value("validationGrouping") === "manifest" ? value("validationSource") : "",
+      independent_episodes: value("validationGrouping") === "independent", fraction: num("validationFraction"),
+    })});
+    pendingValidation = {id: result.id, output};
+    selectedJob = result.id;
+    toast("正在分组划分；完成后自动填入启用清单，请重新计算归一化");
+    await refreshJobs();
+  } catch (error) { toast(error.message, true); }
+};
+$("validationManifest").addEventListener("change", () => {
+  save(); loadConfigProfile();
+  $("validationHint").textContent = value("validationManifest")
+    ? "已选择独立验证。先用该清单重新归一化，再启动新实验；旧的全量训练不能补称独立验证。"
+    : "未启用独立验证；仅显示训练 loss。";
+});
 $("startServe").onclick = () => start("/api/jobs/serve", {
   openpi_root: value("openpiRoot"), config_name: value("serveConfig"), checkpoint_dir: value("serveCheckpoint"),
   cuda_devices: value("serveCudaDevices"), memory_fraction: num("serveMemoryFraction"),
@@ -517,7 +546,8 @@ function fmt(valueToFormat) {
 
 function chart(id, points, key, color) {
   const svg = $(id);
-  const values = points.map((point) => [Number(point.step), Number(point.metrics?.[key])]).filter((point) => point.every(Number.isFinite));
+  const values = points.filter((point) => point.metrics?.[key] != null)
+    .map((point) => [Number(point.step ?? point.current), Number(point.metrics[key])]).filter((point) => point.every(Number.isFinite));
   if (values.length < 2) {
     svg.innerHTML = "";
     return;
@@ -528,6 +558,39 @@ function chart(id, points, key, color) {
   const path = values.map(([x, y], index) => `${index ? "L" : "M"}${20 + 560 * (x - xmin) / Math.max(1, xmax - xmin)},${150 - 125 * (y - ymin) / Math.max(1e-12, ymax - ymin)}`).join(" ");
   svg.innerHTML = `<path d="${path}" fill="none" stroke="${color}" stroke-width="3"/><text x="20" y="165" font-size="11" fill="#718096">${xmin} → ${xmax} steps</text>`;
 }
+
+function renderLossCharts(points) {
+  const trends = points.map((p) => ({...p, metrics: {...p.metrics, loss: p.display?.loss_trend ?? p.metrics?.loss}}));
+  chart("lossChart", value("lossView") === "raw" ? points : trends, "loss", "#2457e6");
+  $("lossPeakCount").textContent = `${points.filter((p) => p.display?.loss_outlier).length} 个趋势离群点；原始值未删除`;
+  const evaluations = points.filter((p) => Number.isFinite(p.metrics?.val_loss));
+  const last = evaluations.at(-1)?.metrics;
+  $("metricTrainEval").textContent = last ? fmt(last.train_eval_loss) : "—";
+  $("metricValidation").textContent = last ? fmt(last.val_loss) : "—";
+  $("metricGap").textContent = last ? fmt(last.generalization_gap) : "—";
+  $("metricBestStep").textContent = last ? String(last.best_validation_step) : "—";
+  $("overfitHint").textContent = !last ? "尚无独立验证记录；旧日志无法补算历史验证 loss。" : last.overfit_warning
+    ? "提示：训练参考 loss 下降，而连续验证值高于历史最佳。疑似过拟合，请结合误差条和任务成功率判断；不会自动停训。"
+    : "观察同模式原始 loss 的趋势，不要求两条线重合；最佳评估 step 不一定有保留的 checkpoint。";
+  const svg = $("validationChart");
+  if (!evaluations.length) { svg.innerHTML = ''; return; }
+  const xs = evaluations.map((p) => Number(p.step ?? p.current));
+  const ys = evaluations.flatMap((p) => [p.metrics.train_eval_loss,
+    p.metrics.val_loss-2*(p.metrics.val_stderr || 0), p.metrics.val_loss+2*(p.metrics.val_stderr || 0)]);
+  const lo = Math.min(...ys); const hi = Math.max(...ys);
+  const x = (i) => 40 + 530 * (xs[i] - xs[0]) / Math.max(1, xs.at(-1)-xs[0]);
+  const y = (v) => 190 - 145 * (v-lo) / Math.max(1e-12, hi-lo);
+  svg.innerHTML = [['train_eval_loss','#2457e6','训练参考'],['val_loss','#f17835','验证集']].map(([key,color,label],k) => {
+    const path = evaluations.map((p,i) => `${i ? 'L':'M'}${x(i)},${y(p.metrics[key])}`).join(' ');
+    return `<path d="${path}" fill="none" stroke="${color}" stroke-width="2.5"/>`
+      + evaluations.map((p,i) => `<circle cx="${x(i)}" cy="${y(p.metrics[key])}" r="3" fill="${color}"><title>step ${xs[i]}: ${p.metrics[key]}</title></circle>`).join('')
+      + `<text x="${40+k*155}" y="22" fill="${color}" font-size="13">${label}（eval）</text>`;
+  }).join('') + evaluations.map((p,i) => {
+    const se = 2*(p.metrics.val_stderr || 0);
+    return `<line x1="${x(i)}" x2="${x(i)}" y1="${y(p.metrics.val_loss-se)}" y2="${y(p.metrics.val_loss+se)}" stroke="#f17835" opacity=".45"/>`;
+  }).join('') + `<text x="40" y="220" fill="#718096" font-size="12">${xs[0]} → ${xs.at(-1)} steps · loss ${lo.toExponential(2)} ~ ${hi.toExponential(2)} · 验证 ±2 batch SE</text>`;
+}
+$("lossView").addEventListener("change", () => { save(); renderLossCharts(selectedMetrics); });
 
 async function show(job) {
   selectedJob = job.id;
@@ -547,7 +610,8 @@ async function show(job) {
   try {
     $("jobLog").textContent = (await api(`/api/jobs/${job.id}/log`)).text || "日志尚未产生";
     const metrics = await api(`/api/jobs/${job.id}/metrics`);
-    chart("lossChart", metrics, "loss", "#2457e6");
+    selectedMetrics = metrics;
+    renderLossCharts(metrics);
     chart("normChart", metrics, "grad_norm", "#06a4ba");
   } catch (_error) { /* Job may finish between list and detail fetch. */ }
 }
@@ -555,6 +619,14 @@ async function show(job) {
 async function refreshJobs() {
   try {
     const jobs = await api("/api/jobs");
+    if (pendingValidation) {
+      const completed = jobs.find((job) => job.id === pendingValidation.id && job.status === 'succeeded');
+      if (completed) {
+        $("validationManifest").value = pendingValidation.output;
+        pendingValidation = null;
+        $("validationManifest").dispatchEvent(new Event('change'));
+      }
+    }
     $("jobList").innerHTML = jobs.length
       ? jobs.map((job) => `<div class="job" data-id="${job.id}"><strong>${escapeHtml(job.kind)}</strong><br><small>${job.id} · ${job.status} · ${Number(job.progress?.percent || 0).toFixed(1)}%</small></div>`).join("")
       : "暂无任务";
@@ -675,6 +747,7 @@ async function init() {
       hfDatasetsCache: config.hf_datasets_cache,
       tmpdir: config.tmpdir,
       uvCacheDir: config.uv_cache_dir,
+      validationOutput: config.validation_split,
       auditDataset: config.raw_dataset,
       auditReport: config.audit_report,
       spikeSource: config.raw_dataset,
