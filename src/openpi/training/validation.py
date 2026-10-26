@@ -87,5 +87,24 @@ class EvaluationHistory:
         record.update(summary)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, allow_nan=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         self._atomic(self.summary_path, {**record, **summary})
         return record
+
+    def mark_checkpoint_complete(self, step: int) -> None:
+        """Selection calls this only AFTER Orbax wait_until_finished returns."""
+        for record in self.records:
+            if record["step"] == step:
+                record["checkpoint_saved"] = True
+        if self.records:
+            saved = [record for record in self.records if record["checkpoint_saved"]]
+            best_saved = min(saved, key=lambda record: record["val_loss"]) if saved else None
+            self.records[-1]["best_evaluated_saved_step"] = best_saved["step"] if best_saved else None
+        with self.path.open("w", encoding="utf-8") as handle:
+            for record in self.records:
+                handle.write(json.dumps(record, allow_nan=False)+"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if self.records:
+            self._atomic(self.summary_path, self.records[-1])

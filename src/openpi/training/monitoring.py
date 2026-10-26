@@ -34,6 +34,7 @@ _SCALAR_COLUMNS = (
     "samples_per_sec",
     "train_eval_loss", "val_loss", "generalization_gap", "val_stderr",
     "best_validation_step", "best_validation_loss", "overfit_warning", "evaluation_seconds",
+    "action_mse", "jerk_excess", "s_cf", "s_cf_active", "grounding_margin", "instruction_specificity",
 )
 
 
@@ -99,6 +100,40 @@ class TrainingMonitor:
         self._last_log_time = self._start_time
         self._last_log_step: int | None = None
 
+    def log_step_losses(self, final_step: int, losses) -> None:
+        """Persist every optimizer-batch loss after the existing interval sync.
+
+        No new model forward/backward call or per-step GPU synchronization.
+        """
+        values = np.asarray(losses).reshape(-1)
+        path = self.output_dir / "train_loss_steps.jsonl"
+        with path.open("a", encoding="utf-8") as stream:
+            for index, loss in enumerate(values):
+                step = int(final_step-len(values)+1+index)
+                record = {"step": step, "optimizer_step": step+1,
+                          "loss": float(loss) if np.isfinite(loss) else None,
+                          "nonfinite": None if np.isfinite(loss) else str(loss)}
+                stream.write(json.dumps(record, allow_nan=False)+"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def attach_evaluation(self, step: int, metrics) -> None:
+        """Enrich an existing logged step, never create misleading duplicate loss rows."""
+        matches = [row for row in self._history if row["step"] == step]
+        if not matches:
+            return
+        matches[-1].update({key: value for key, value in metrics.items() if isinstance(value, (int, float))})
+        self._rewrite_history()
+
+    def _rewrite_history(self):
+        with self.jsonl_path.open("w", encoding="utf-8") as stream:
+            for record in self._history:
+                stream.write(json.dumps(record, ensure_ascii=False, allow_nan=True)+"\n")
+        with self.csv_path.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=_SCALAR_COLUMNS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(self._history)
+
     def _load_history(self) -> list[dict[str, Any]]:
         if not self.jsonl_path.exists():
             return []
@@ -120,6 +155,10 @@ class TrainingMonitor:
 
     def prepare_resume(self, start_step: int) -> None:
         """Discard metrics newer than the restored checkpoint before appending resumed history."""
+        raw_path = self.output_dir / "train_loss_steps.jsonl"
+        if raw_path.exists():
+            raw = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            raw_path.write_text("".join(json.dumps(row)+"\n" for row in raw if row["step"] < start_step), encoding="utf-8")
         retained = [record for record in self._history if int(record["step"]) < start_step]
         if len(retained) == len(self._history):
             return

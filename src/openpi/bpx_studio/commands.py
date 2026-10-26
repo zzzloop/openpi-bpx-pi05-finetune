@@ -233,6 +233,7 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
             f"--keep-period={keep_period}",
             f"--{mode}",
             *_validation_arguments(values),
+            *_selection_arguments(values),
         ),
         cwd=root,
         env=env,
@@ -252,6 +253,54 @@ def _validation_arguments(values, *, normalize=False):
     interval = _positive(int(values.get("validation_interval", 1000)), "验证间隔")
     batches = _positive(int(values.get("validation_batches", 16)), "验证 batches", maximum=256)
     return (f"--validation-manifest={path}", f"--validation-interval={interval}", f"--validation-batches={batches}")
+
+
+def _selection_arguments(values):
+    arguments = []
+    suite = str(values.get("selection_suite", "")).strip()
+    if suite:
+        if not str(values.get("validation_manifest", "")).strip():
+            raise ValueError("多指标选模必须启用分组验证清单")
+        path = pathlib.Path(suite).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"固定选模样本清单不存在: {path}")
+        keep = _positive(int(values.get("selection_keep", 3)), "候选保留数量", maximum=20)
+        denoise = _positive(int(values.get("selection_denoise_steps", 10)), "选模去噪步数", maximum=100)
+        arguments.extend((f"--selection-suite={path}", f"--selection-keep={keep}", f"--selection-denoise-steps={denoise}"))
+    initial = str(values.get("init_checkpoint", "")).strip()
+    if initial:
+        if values.get("mode") == "resume":
+            raise ValueError("候选初始化是新一轮微调，不能同时使用断点续训 resume")
+        path = pathlib.Path(initial).expanduser().resolve()
+        if not path.is_file() and not (path / "params").is_dir():
+            raise ValueError("初始化路径应为完整 checkpoint 或 recommended.json")
+        arguments.append(f"--init-checkpoint={path}")
+    return tuple(arguments)
+
+
+def build_probe_suite(project_root, values):
+    config = _name(str(values["config_name"]), "训练配置名")
+    output = _output_path(str(values["output_dir"]), "固定评估集输出目录")
+    if output.exists():
+        raise ValueError("固定评估集不可覆盖，请更换输出目录")
+    raw_manifest = str(values.get("validation_manifest", "")).strip()
+    if not raw_manifest:
+        raise ValueError("先生成并启用分组验证清单，再准备选模评估集")
+    manifest = pathlib.Path(raw_manifest).expanduser().resolve()
+    from openpi.training.validation_split import load_split
+    load_split(manifest)
+    arguments = [sys.executable, "scripts/prepare_checkpoint_probes.py", "--config-name", config,
+                 "--validation-manifest", str(manifest), "--output-dir", str(output),
+                 "--max-cases", str(_positive(int(values.get("max_cases", 16)), "固定场景数", maximum=256))]
+    case_spec = str(values.get("case_spec", "")).strip()
+    if case_spec:
+        path = pathlib.Path(case_spec).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"人工复核指令对文件不存在: {path}")
+        arguments.extend(("--case-spec", str(path)))
+    env = _data_environment({key: str(value) for key, value in values.items()})
+    env.update(JAX_PLATFORMS="cpu", CUDA_VISIBLE_DEVICES="", XLA_PYTHON_CLIENT_PREALLOCATE="false")
+    return CommandSpec(argv=tuple(arguments), cwd=project_root, env=env)
 
 
 def build_validation_split(project_root: pathlib.Path, values: Mapping[str, object]) -> CommandSpec:

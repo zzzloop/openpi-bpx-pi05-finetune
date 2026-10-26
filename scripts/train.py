@@ -5,6 +5,7 @@ import json
 import logging
 import pathlib
 import platform
+import shutil
 import time
 from typing import Any
 
@@ -33,6 +34,8 @@ import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
 import openpi.training.validation as _validation
 import openpi.training.validation_split as _validation_split
+import openpi.training.checkpoint_selection as _selection
+import openpi.training.selection_probes as _selection_probes
 
 
 def init_logging():
@@ -219,6 +222,19 @@ def eval_step(model_def, params, rng, batch):
 
 def main(config: _config.TrainConfig):
     config = _validation_split.configure(config)
+    if config.init_checkpoint:
+        source = pathlib.Path(config.init_checkpoint).expanduser().resolve()
+        if source.suffix == ".json":
+            source = pathlib.Path(json.loads(source.read_text(encoding="utf-8"))["checkpoint_path"])
+        if not (source / "params").is_dir():
+            raise FileNotFoundError(f"Initialization checkpoint params missing: {source}")
+        if source.resolve().is_relative_to(pathlib.Path(config.checkpoint_dir).resolve()):
+            raise ValueError("Initialization weights must be in a DIFFERENT experiment; do not overwrite their source run")
+        config = dataclasses.replace(config, weight_loader=_weight_loaders.CheckpointWeightLoader(str(source / "params")))
+    if config.selection_suite:
+        if jax.process_count() != 1:
+            raise NotImplementedError("Checkpoint selection currently supports one host with FSDP, not multi-host")
+        config = dataclasses.replace(config, monitoring_enabled=True)
     init_logging()
     logging.info(f"Running on: {platform.node()}")
 
@@ -301,6 +317,8 @@ def main(config: _config.TrainConfig):
 
     evaluation_history = None
     evaluation_batches = {}
+    selector = None
+    probe_runtime = None
     if config.validation_manifest:
         if config.validation_interval < 1 or config.validation_batches < 1:
             raise ValueError("Validation interval and batches must be positive")
@@ -311,7 +329,10 @@ def main(config: _config.TrainConfig):
                     "batch_size": config.batch_size, "mode": "current_params_train_false",
                     "config": config.name, "action_horizon": config.model.action_horizon,
                     "sampling": "task_stratified_without_replacement"}
-        stats_path = pathlib.Path(config.assets_dirs) / config.data.repo_id / "norm_stats.json"
+        if config.selection_suite:
+            identity["mode"] = "servable_ema_or_current_train_false"
+        stats_asset = data_loader.data_config().asset_id or config.data.repo_id
+        stats_path = pathlib.Path(config.assets_dirs) / stats_asset / "norm_stats.json"
         identity["norm_stats_sha256"] = hashlib.sha256(stats_path.read_bytes()).hexdigest()
         evaluation_history = _validation.EvaluationHistory(
             pathlib.Path(config.checkpoint_dir) / "monitoring", identity, start_step=start_step, resume=resuming)
@@ -335,20 +356,21 @@ def main(config: _config.TrainConfig):
                 device_batch = jax.tree.map(
                     lambda x: jax.make_array_from_process_local_data(data_sharding, x), host_batch)
                 with sharding.set_mesh(mesh):
-                    return jax.device_get(peval(train_state.params, key, device_batch))
+                    params = (train_state.ema_params if train_state.ema_params is not None else train_state.params) if selector is not None else train_state.params
+                    return jax.device_get(peval(params, key, device_batch))
             results[split] = _validation.evaluate_batches(batches, evaluate)
         train_loss, train_se = results["train_reference"]
         val_loss, val_se = results["validation"]
         record = evaluation_history.append(
             step, train_loss, val_loss, train_stderr=train_se, val_stderr=val_se,
             seconds=time.monotonic() - started,
-            checkpoint_saved=((step % config.save_interval == 0 and step > start_step)
+            checkpoint_saved=False if selector is not None else ((step % config.save_interval == 0 and step > start_step)
                               or step == config.num_train_steps - 1))
         return {key: value for key, value in record.items()
                 if key in ("train_eval_loss", "val_loss", "generalization_gap", "val_stderr",
                            "best_validation_step", "best_validation_loss", "overfit_warning", "evaluation_seconds")}
 
-    def flush_metrics(step: int, visualized_batch, *, final: bool = False) -> None:
+    def flush_metrics(step: int, visualized_batch, *, final: bool = False, evaluate: bool = True) -> None:
         nonlocal infos
         if not infos:
             return
@@ -358,7 +380,7 @@ def main(config: _config.TrainConfig):
             for key, value in stacked_infos.items()
         }
         reduced_info = jax.device_get(reduced_info)
-        if evaluation_history is not None and (step % config.validation_interval == 0 or final):
+        if evaluation_history is not None and evaluate and (step % config.validation_interval == 0 or final):
             reduced_info.update(run_evaluation(step))
         scalar_info = {key: value for key, value in reduced_info.items() if np.asarray(value).ndim == 0}
         info_str = ", ".join(f"{key}={float(value):.4g}" for key, value in scalar_info.items())
@@ -371,6 +393,7 @@ def main(config: _config.TrainConfig):
         )
         nonfinite_metrics = [key for key, value in reduced_info.items() if not np.isfinite(np.asarray(value)).all()]
         if monitor is not None:
+            monitor.log_step_losses(step, jax.device_get(stacked_infos["loss"]))
             plot_paths = monitor.log_metrics(step, reduced_info, force_plot=final)
             if plot_paths:
                 wandb_payload["monitor/training_overview"] = wandb.Image(str(plot_paths[0]))
@@ -395,22 +418,107 @@ def main(config: _config.TrainConfig):
         if nonfinite_metrics:
             raise FloatingPointError(f"Non-finite training metrics at step {step}: {nonfinite_metrics}")
 
+    if config.selection_suite:
+        probe_runtime = _selection_probes.ProbeRuntime(
+            config, data_loader.data_config(), train_state.model_def, train_state_sharding.params, data_sharding, mesh)
+        selection_identity = {"schema_version": 1, "suite_sha256": probe_runtime.digest,
+                              "validation": identity, "keep": config.selection_keep,
+                              "denoise_steps": config.selection_denoise_steps, "seed": config.seed,
+                              "action_names": list(config.monitoring_action_names),
+                              "inference_params": "ema" if train_state.ema_params is not None else "current",
+                              "initial_checkpoint": config.init_checkpoint,
+                              "selection_policy": probe_runtime.manifest.get("selection_policy", {}),
+                              "loss_function": "UNCHANGED compute_loss; diagnostics never enter gradients"}
+        selection_identity.update(
+            probe_code_sha256=hashlib.sha256(pathlib.Path(_selection_probes.__file__).read_bytes()).hexdigest(),
+            selector_code_sha256=hashlib.sha256(pathlib.Path(_selection.__file__).read_bytes()).hexdigest(),
+            velocity_model_code_sha256=hashlib.sha256(pathlib.Path(_model.__file__).with_name("pi0.py").read_bytes()).hexdigest())
+        selector = _selection.SelectionHistory(
+            pathlib.Path(config.checkpoint_dir), selection_identity, keep=config.selection_keep,
+            start_step=start_step, resume=resuming, gates=probe_runtime.manifest.get("gates"),
+            external_assessments=probe_runtime.manifest.get("external_assessments"))
+        _selection.atomic_json(selector.root / "training_config.json", {"config_repr": repr(config),
+            "config_source_sha256": hashlib.sha256(pathlib.Path(_config.__file__).read_bytes()).hexdigest(),
+            "train_source_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
+            "jax_version": jax.__version__, "numpy_version": np.__version__, "python": platform.python_version()})
+        original_suite = pathlib.Path(config.selection_suite).resolve()
+        suite_copy = selector.root / "suite.json"
+        if original_suite != suite_copy.resolve():
+            # Preserve the exact bytes used for suite_sha256, not a re-serialized JSON.
+            temporary = suite_copy.with_suffix(".json.tmp")
+            shutil.copy2(original_suite, temporary)
+            temporary.replace(suite_copy)
+        source_bundle = original_suite.parent / probe_runtime.manifest["bundle"]
+        if not (selector.root / "probes.npz").is_file():
+            shutil.copy2(source_bundle, selector.root / "probes.npz")
+
+    def select_current(step, *, complete):
+        if not selector:
+            return
+        if not evaluation_history.records or evaluation_history.records[-1]["step"] != step:
+            run_evaluation(step)
+        if complete:
+            evaluation_history.mark_checkpoint_complete(step)
+        params = train_state.ema_params if train_state.ema_params is not None else train_state.params
+        started = time.monotonic()
+        metrics, rows, artifacts = probe_runtime.evaluate(params)
+        loss_record = evaluation_history.records[-1]
+        metrics.update({key: loss_record[key] for key in ("train_eval_loss", "val_loss", "val_stderr", "generalization_gap")})
+        metrics["probe_seconds"] = time.monotonic()-started
+        decision = selector.append(step, metrics, rows, artifacts,
+                                   optimizer_step=int(train_state.step), checkpoint_complete=complete)
+        if complete:
+            monitor.attach_evaluation(step, metrics)
+            monitor.render_plots(step)
+        logging.info("Checkpoint selection: %s, recommended=%s", decision["status"], decision["checkpoint_path"])
+        for warning in decision["warnings"]:
+            logging.warning("CHECKPOINT DIAGNOSTIC: %s", warning)
+
+    # Baseline BEFORE the first optimizer update: required for retention trends.
+    if selector and not selector.records:
+        select_current(start_step-1, complete=False)
+
     last_trained_batch = batch
-    for step in pbar:
-        last_trained_batch = batch
-        with sharding.set_mesh(mesh):
-            train_state, info = ptrain_step(train_rng, train_state, batch)
-        infos.append(info)
-        if step % config.log_interval == 0:
-            flush_metrics(step, last_trained_batch, final=step == config.num_train_steps - 1)
-        batch = next(data_iter)
+    last_completed_step = start_step-1
+    try:
+        for step in pbar:
+            last_trained_batch = batch
+            with sharding.set_mesh(mesh):
+                train_state, info = ptrain_step(train_rng, train_state, batch)
+            last_completed_step = step
+            infos.append(info)
+            if step % config.log_interval == 0:
+                flush_metrics(step, last_trained_batch, final=step == config.num_train_steps - 1)
+            batch = next(data_iter)
 
-        if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
-            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
+                if selector and infos:
+                    flush_metrics(step, last_trained_batch, final=step == config.num_train_steps-1)
+                _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+                if selector:
+                    checkpoint_manager.wait_until_finished()
+                    try:
+                        select_current(step, complete=True)
+                    except Exception as error:
+                        # Keep optimizer/training untouched; never promote an unscored checkpoint.
+                        logging.exception("Checkpoint probes failed; previous recommendation retained")
+                        _selection.atomic_json(selector.root / f"evaluation_error_{step}.json",
+                                               {"step": step, "error": str(error), "selected": False})
 
-    flush_metrics(config.num_train_steps - 1, last_trained_batch, final=True)
-    logging.info("Waiting for checkpoint manager to finish")
-    checkpoint_manager.wait_until_finished()
+        flush_metrics(config.num_train_steps - 1, last_trained_batch, final=True)
+        logging.info("Waiting for checkpoint manager to finish")
+        checkpoint_manager.wait_until_finished()
+    finally:
+        # Persist pending scalar losses and refresh charts even after an interrupt.
+        # Do not launch fresh expensive evaluation while handling an exception.
+        if monitor is not None:
+            try:
+                if infos and last_completed_step >= start_step:
+                    flush_metrics(last_completed_step, last_trained_batch, final=True, evaluate=False)
+                elif monitor._history:
+                    monitor.render_plots(monitor._history[-1]["step"])
+            except Exception:
+                logging.exception("Could not finalize diagnostic plots; raw metric files remain available")
 
 
 if __name__ == "__main__":

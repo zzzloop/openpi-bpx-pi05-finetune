@@ -63,6 +63,16 @@
       </div><button id="startExport" class="primary">导出 HDF5</button></section>
 
       <section class="card panel" data-panel="train"><div class="section-title"><h2><em>05</em>OpenPI 训练</h2><span>关键参数全部显式记录</span></div>
+        <details class="validation-setup"><summary>多指标 Checkpoint 选模（只做评估，不改变训练 Loss）</summary><p>先完成分组验证与训练集归一化，再准备固定评估样本。每次实际保存 Checkpoint 后，评估推理使用的参数，保留有限候选。动作差异不等于完整 VLM 能力保留，未人工复核的指令对只生成暂定结论。</p><div class="grid three">
+          <label class="wide">固定评估集输出目录<input id="probeOutput" /><small>新目录，生成 suite.json 与冻结的图像/指令/目标/噪声；不复制大数据集。</small></label>
+          <label class="wide">人工复核的场景指令对 JSON（可选）<input id="probeCaseSpec" /><small>留空生成未复核诊断样本及 editable_case_spec.json；人工复核后换新目录重建。</small></label>
+          <label>最多固定场景数<input id="probeCases" type="number" min="1" max="256" value="16" /></label>
+        </div><button id="createProbeSuite">准备固定评估集（先完成归一化）</button><div class="grid three">
+          <label class="wide">启用的选模 Suite<input id="selectionSuite" placeholder="留空不启用；填写准备好的 suite.json" /><small>与本次 Config、验证划分、归一化严格绑定；续训不能更换。</small></label>
+          <label>保留候选数<input id="selectionKeep" type="number" value="3" min="1" max="20" /><small>只归档 params/assets，不额外保留优化器状态。</small></label>
+          <label>评估去噪步数<input id="selectionDenoise" type="number" value="10" min="1" max="100" /><small>只影响评估计算量，不改变训练损失。</small></label>
+          <label class="wide">新一轮微调的初始化 Checkpoint（可选）<input id="initCheckpoint" placeholder="完整 checkpoint 目录或 recommended.json" /><small>仅载入权重，优化器与 step 重新开始。使用新实验名，不能同时选 resume。</small></label>
+        </div></details>
         <details class="validation-setup" open><summary>训练 / 验证对比与过拟合观察</summary><p>新实验建议先生成完整 episode 分组划分，再重新计算训练部分的归一化。已有模型看过的数据不能充当独立验证集。验证只做前向计算，不自动停训。</p><div class="grid three">
           <label class="wide">划分清单输出<input id="validationOutput" /><small>生成后不可覆盖；训练与归一化使用同一份清单。</small></label>
           <label>验证分组比例<input id="validationFraction" type="number" min="0.01" max="0.49" step="0.01" value="0.1" /></label>
@@ -85,6 +95,7 @@
         <div class="validation-metrics"><div>训练参考 loss（eval）<strong id="metricTrainEval">—</strong></div><div>验证 loss<strong id="metricValidation">—</strong></div><div>验证 − 训练<strong id="metricGap">—</strong></div><div>最佳验证 step<strong id="metricBestStep">—</strong></div></div>
         <p id="overfitHint" class="config-note">等待独立验证指标</p><div class="chart-toolbar"><label>训练曲线<select id="lossView"><option value="trend">稳健去毛刺趋势（Hampel + EMA）</option><option value="raw">原始训练 loss（保留全部峰值）</option></select></label><span id="lossPeakCount"></span></div>
         <div class="charts"><svg id="lossChart" viewBox="0 0 600 170"></svg><svg id="normChart" viewBox="0 0 600 170"></svg></div><h3>训练参考 / 验证 loss（同一 eval 模式，原始值）</h3><svg id="validationChart" viewBox="0 0 600 230"></svg><details><summary>受控命令与环境</summary><pre id="commandText">—</pre></details><pre id="jobLog" class="log">任务日志将在这里显示。</pre></article></section>
+      <section class="card" id="selectionResults" hidden><div class="section-title"><h2>多指标选模结果</h2><span id="selectionStatus">等待评估</span></div><p id="selectionReason"></p><p>推荐 Checkpoint：<code id="selectionPath">—</code></p><pre id="selectionWarnings"></pre><button id="useSelectedInit">将推荐权重填入下一轮微调</button><p>该结果不同于“Validation Loss 最低 step”。离线指标不能替代真机成功率或独立 VLM 基准。</p><img id="selectionPlot" alt="固定评估集上的动作质量与语言响应趋势" style="max-width:100%;height:auto" hidden /></section>
     </main><datalist id="bpxConfigNames"></datalist><div id="toast"></div><script src="/static/app.js"></script>
   </body>
 </html>

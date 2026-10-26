@@ -570,6 +570,12 @@ class TrainConfig:
     validation_interval: int = 1000
     validation_batches: int = 16
     validation_seed: int = 42
+    # Optional frozen, held-out action/language evaluation bundle. Diagnostics only.
+    selection_suite: str | None = None
+    selection_keep: int = 3
+    selection_denoise_steps: int = 10
+    # Weight-only initialization for a NEW finetuning run; never restores optimizer/step.
+    init_checkpoint: str | None = None
     # Number of train steps (batches) to run.
     num_train_steps: int = 30_000
 
@@ -627,6 +633,12 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
+        if self.resume and self.init_checkpoint:
+            raise ValueError("init_checkpoint starts a new optimizer; do not combine it with resume")
+        if self.selection_keep < 1 or self.selection_denoise_steps < 1:
+            raise ValueError("Selection candidate count and denoising steps must be positive")
+        if self.selection_suite and not self.validation_manifest:
+            raise ValueError("Checkpoint selection requires an immutable grouped validation manifest")
         if self.monitoring_enabled and (
             self.monitoring_plot_interval <= 0
             or self.monitoring_visualization_interval <= 0

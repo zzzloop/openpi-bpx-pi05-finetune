@@ -9,6 +9,7 @@ const stored = [
   "trainMode", "serveConfig", "serveCheckpoint", "serveCudaDevices", "serveMemoryFraction",
   "validationManifest", "validationOutput", "validationSource", "validationGrouping", "validationFraction",
   "validationInterval", "validationBatches", "lossView",
+  "probeOutput", "probeCaseSpec", "probeCases", "selectionSuite", "selectionKeep", "selectionDenoise", "initCheckpoint",
 ];
 
 let selectedJob = null;
@@ -20,6 +21,9 @@ let spikeReportOffset = 0;
 const spikePageSize = 100;
 let lastAutoLoadedSpikeJob = "";
 let pendingValidation = null;
+let pendingProbe = null;
+let recommendedCheckpoint = "";
+let selectionJobId = null;
 let selectedMetrics = [];
 
 function value(id) {
@@ -473,7 +477,27 @@ $("startTrain").onclick = async () => {
     mode: value("trainMode"),
     validation_manifest: value("validationManifest"), validation_interval: num("validationInterval"),
     validation_batches: num("validationBatches"),
+    selection_suite: value("selectionSuite"), selection_keep: num("selectionKeep"),
+    selection_denoise_steps: num("selectionDenoise"), init_checkpoint: value("initCheckpoint"),
   });
+};
+$("createProbeSuite").onclick = async () => {
+  try {
+    const output = value("probeOutput");
+    const job = await api("/api/jobs/selection-suite", {method: "POST", body: JSON.stringify({
+      ...dataEnvironment(), config_name: value("trainConfig"), output_dir: output,
+      case_spec: value("probeCaseSpec"), max_cases: num("probeCases"),
+    })});
+    pendingProbe = {id: job.id, output}; selectedJob = job.id;
+    toast("正在准备固定选模样本；未经人工复核的指令对仅供诊断");
+    await refreshJobs();
+  } catch (error) { toast(error.message, true); }
+};
+$("useSelectedInit").onclick = () => {
+  if (!recommendedCheckpoint) return;
+  $("initCheckpoint").value = recommendedCheckpoint;
+  save();
+  toast("已填入初始化权重；请生成新实验名并选择新实验模式，不会自动启动训练");
 };
 $("createValidationSplit").onclick = async () => {
   try {
@@ -613,6 +637,13 @@ async function show(job) {
   document.querySelectorAll(".job").forEach((node) => node.classList.toggle("selected", node.dataset.id === selectedJob));
   $("selectedKind").textContent = job.kind.toUpperCase();
   $("selectedTitle").textContent = job.id;
+  if (selectionJobId !== job.id) {
+    selectionJobId = job.id; recommendedCheckpoint = "";
+    $("selectionPath").textContent = "等待当前任务的选模结果";
+    $("selectionWarnings").textContent = "";
+    $("selectionPlot").hidden = true;
+    $("useSelectedInit").disabled = true;
+  }
   const progress = job.progress || {};
   $("progressText").textContent = `${progress.current ?? 0} / ${progress.total ?? "?"}`;
   $("progressPercent").textContent = `${Number(progress.percent || 0).toFixed(1)}%`;
@@ -629,12 +660,47 @@ async function show(job) {
     selectedMetrics = metrics;
     renderLossCharts(metrics);
     chart("normChart", metrics, "grad_norm", "#06a4ba");
+    $("selectionResults").hidden = job.kind !== "train";
+    if (job.kind === "train") {
+      const report = await api(`/api/jobs/${job.id}/selection`);
+      const labels = {not_evaluated: "尚未启用或尚未完成评估", insufficient_evidence: "证据不足",
+        awaiting_resumed_evaluation: "已恢复较早训练状态，等待重新评估",
+        provisional_offline_candidate: "暂定离线候选", offline_balanced_candidate: "离线多指标候选",
+        candidate_with_external_benchmark_support: "有外部基准支持的候选",
+        no_candidate_meets_user_gates: "尚无候选达到设定标准"};
+      $("selectionStatus").textContent = labels[report.status] || report.status;
+      $("selectionReason").textContent = `推荐 step：${report.recommended_step ?? "—"}；保留：${(report.retained_steps || []).join(", ") || "—"}`;
+      recommendedCheckpoint = report.checkpoint_path || "";
+      $("selectionPath").textContent = recommendedCheckpoint || "尚无推荐";
+      const warningLabels = {
+        overfit_suspected: "疑似过拟合：验证恶化、训练参考 loss 仍下降。",
+        instruction_response_decline: "反事实语言响应持续衰减：建议复核并补采固定场景的对照指令。",
+        validation_plateau_possible: "验证收益可能进入平台期，变化小于当前测量波动。",
+        absolute_adaptation_not_calibrated: "未校准绝对任务适配标准：相对最优不代表已能完成抓取。",
+        semantic_retention_unconfirmed: "语义保留证据不足：需要人工复核指令对、同义改写及正确性证据。",
+        adaptation_worse_than_initial_reference: "动作预测比初始化参考恶化，请检查适配和数据。",
+        action_validation_tradeoff: "动作误差与验证 loss 的较优区域存在冲突。",
+        low_cf_scene_response: "部分固定场景的指令响应低于所设阈值，建议人工复核/补采。",
+        external_vlm_benchmark_decline: "外部语义基准测评显示退化迹象；结论限于该基准。",
+      };
+      $("selectionWarnings").textContent = (report.warnings || []).map((message) =>
+        warningLabels[message.split(":")[0]] || message).join("\n");
+      $("useSelectedInit").disabled = !recommendedCheckpoint;
+      if (report.status !== "not_evaluated") {
+        $("selectionPlot").hidden = false;
+        $("selectionPlot").src = `/api/jobs/${job.id}/selection-plot?version=${report.updated_at || report.recommended_step || 0}`;
+      } else $("selectionPlot").hidden = true;
+    }
   } catch (_error) { /* Job may finish between list and detail fetch. */ }
 }
 
 async function refreshJobs() {
   try {
     const jobs = await api("/api/jobs");
+    if (pendingProbe && jobs.some((job) => job.id === pendingProbe.id && job.status === "succeeded")) {
+      $("selectionSuite").value = `${pendingProbe.output.replace(/\/$/, "")}/suite.json`;
+      pendingProbe = null; save(); toast("固定评估集已准备；请确认指令对是否已人工复核");
+    }
     if (pendingValidation) {
       const completed = jobs.find((job) => job.id === pendingValidation.id && job.status === 'succeeded');
       if (completed) {
@@ -776,6 +842,7 @@ async function init() {
       trainConfig: config.default_config_name,
       serveConfig: config.default_config_name,
       expName: config.default_experiment_name,
+      probeOutput: config.selection_suite_output,
     };
     Object.entries(defaults).forEach(([id, val]) => {
       if (["cleanOutput", "exportSource"].includes(id) && pathMatches($(id).value, `${config.hf_lerobot_home}/bpx/bpx_v2_humanoid`)) $(id).value = val;

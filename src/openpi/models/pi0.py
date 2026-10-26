@@ -213,6 +213,24 @@ class Pi0(_model.BaseModel):
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
+    def evaluation_velocity(self, observation: _model.Observation, noisy_actions: _model.Actions, timestep=1.0):
+        """Read-only flow field for diagnostics; never called by the training loss.
+
+        OpenPI uses t=1 for the noise endpoint (paper forward-flow time zero).
+        The global velocity sign reversal leaves squared CF differences unchanged.
+        """
+        observation = _model.preprocess_observation(None, observation, train=False)
+        time = jnp.broadcast_to(jnp.asarray(timestep), observation.state.shape[:-1])
+        prefix, prefix_mask, prefix_ar = self.embed_prefix(observation)
+        suffix, suffix_mask, suffix_ar, condition = self.embed_suffix(observation, noisy_actions, time)
+        mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+        ar = jnp.concatenate([prefix_ar, suffix_ar], axis=0)
+        (_, output), _ = self.PaliGemma.llm(
+            [prefix, suffix], mask=make_attn_mask(mask, ar), positions=jnp.cumsum(mask, axis=1)-1,
+            adarms_cond=[None, condition],
+        )
+        return self.action_out_proj(output[:, -self.action_horizon:])
+
     @override
     def sample_actions(
         self,

@@ -6,6 +6,7 @@ import argparse
 import csv
 import dataclasses
 import logging
+import json
 import os
 import pathlib
 import shutil
@@ -28,6 +29,7 @@ from openpi.bpx_studio.commands import build_policy_serve
 from openpi.bpx_studio.commands import build_spike_job
 from openpi.bpx_studio.commands import build_train
 from openpi.bpx_studio.commands import build_validation_split
+from openpi.bpx_studio.commands import build_probe_suite
 from openpi.bpx_studio.jobs import JobManager
 from openpi.bpx_studio.config_profile import read_config_binding
 from openpi.bpx_studio.status_probe import CachedProbe
@@ -108,6 +110,17 @@ class TrainRequest(DataEnvironment):
     mode: Literal["overwrite", "resume"] = "overwrite"
     validation_interval: int = Field(default=1000, ge=1)
     validation_batches: int = Field(default=16, ge=1, le=256)
+    selection_suite: str = ""
+    selection_keep: int = Field(default=3, ge=1, le=20)
+    selection_denoise_steps: int = Field(default=10, ge=1, le=100)
+    init_checkpoint: str = ""
+
+
+class ProbeSuiteRequest(DataEnvironment):
+    config_name: str
+    output_dir: str
+    case_spec: str = ""
+    max_cases: int = Field(default=16, ge=1, le=256)
 
 
 class ServeRequest(BaseModel):
@@ -142,6 +155,7 @@ def default_paths(data_root: pathlib.Path) -> dict[str, str]:
         "spike_clean_report": str(root / "reports" / f"{DEFAULT_DATASET_NAME}_spikes_clean.json"),
         "hdf5_export": str(root / "exports" / f"{DEFAULT_DATASET_NAME}_hdf5"),
         "validation_split": str(root / "reports" / "validation_split_v1.json"),
+        "selection_suite_output": str(root / "reports" / "selection_suite_v1"),
     }
 
 
@@ -161,6 +175,12 @@ def _checkpoints(checkpoint_root: pathlib.Path) -> list[dict[str, str | int]]:
                 "path": str(step_dir.resolve()),
             }
         )
+    for params in checkpoint_root.glob("*/*/selected_checkpoints/*/params"):
+        step_dir = params.parent
+        if step_dir.name.isdigit() and (step_dir / "assets").is_dir() and (step_dir / "selection.json").is_file():
+            records.append({"config_name": step_dir.parents[2].name,
+                            "experiment_name": step_dir.parents[1].name+" / SELECTED",
+                            "step": int(step_dir.name), "path": str(step_dir.resolve())})
     return sorted(
         records,
         key=lambda item: (str(item["config_name"]), str(item["experiment_name"]), int(item["step"])),
@@ -397,6 +417,33 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+
+    def selection_path(job_id):
+        try:
+            root = manager.training_directory(job_id)
+            if root is None:
+                raise ValueError("该任务不是训练任务")
+            return root / "monitoring/selection"
+        except (KeyError, ValueError, OSError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/jobs/{job_id}/selection")
+    def job_selection(job_id: str):
+        path = selection_path(job_id) / "recommended.json"
+        if not path.is_file():
+            return {"status": "not_evaluated", "checkpoint_path": None, "warnings": []}
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @app.get("/api/jobs/{job_id}/selection-plot")
+    def job_selection_plot(job_id: str):
+        path = selection_path(job_id) / "selection_latest.png"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="选模图尚未生成")
+        return FileResponse(path, media_type="image/png")
+
+    @app.post("/api/jobs/selection-suite")
+    def start_probe_suite(request: ProbeSuiteRequest):
+        return start("selection_suite", lambda: build_probe_suite(project_root, request.model_dump()))
 
     @app.post("/api/jobs/audit")
     def start_audit(request: AuditRequest):

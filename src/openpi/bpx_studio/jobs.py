@@ -195,6 +195,21 @@ class JobManager:
             record["display"] = {"loss_trend": float(value), "loss_outlier": bool(outlier)}
         return records
 
+    def training_directory(self, job_id: str) -> pathlib.Path | None:
+        record = self.get(job_id)
+        if record["kind"] != "train":
+            return None
+        spec = json.loads((pathlib.Path(record["log_path"]).parent / "spec.json").read_text(encoding="utf-8"))
+        argv = spec["argv"]
+        index = argv.index("scripts/train.py")
+        config_name = argv[index+1]
+        options = dict(value[2:].split("=", 1) for value in argv if value.startswith("--") and "=" in value)
+        base = pathlib.Path(options["checkpoint-base-dir"]).expanduser().resolve()
+        for name in (config_name, options["exp-name"]):
+            if pathlib.Path(name).name != name or name in {".", ".."}:
+                raise ValueError("记录的训练目录名称不安全")
+        return base / config_name / options["exp-name"]
+
     def _start_watcher(self, job_id: str) -> None:
         threading.Thread(target=self._watch, args=(job_id,), daemon=True, name=f"bpx-job-{job_id}").start()
 
