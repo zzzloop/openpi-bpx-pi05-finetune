@@ -61,6 +61,13 @@ class JobManager:
                 continue
             self._records[record["id"]] = record
             if record["status"] in _ACTIVE:
+                if record.get("kind") == "normalize":
+                    # Replay active legacy records once, discarding a cached
+                    # 100% that may actually belong to a download/cache bar.
+                    record["progress"] = {"current": 0, "total": None, "percent": 0.0,
+                                          "phase": "初始化：等待归一化统计进度"}
+                    record["log_offset"] = 0
+                    self._consume_log(record)
                 if pathlib.Path(record["exit_path"]).is_file():
                     self._finish_from_exit(record)
                 elif _process_alive(record.get("pid")):
@@ -246,10 +253,14 @@ class JobManager:
             content = handle.read()
             record["log_offset"] = handle.tell()
         for line in content.replace("\r", "\n").splitlines():
-            parsed = parse_progress_line(line, total_units=record.get("total_units"))
+            parsed = parse_progress_line(
+                line, total_units=record.get("total_units"), job_kind=record.get("kind")
+            )
             if parsed is None:
                 continue
-            record["progress"] = {key: parsed[key] for key in ("current", "total", "percent") if key in parsed}
+            record["progress"].update(
+                {key: parsed[key] for key in ("current", "total", "percent", "phase") if key in parsed}
+            )
             if parsed.get("metrics"):
                 record["metrics"] = parsed["metrics"]
                 metrics_path = path.with_name("metrics.jsonl")

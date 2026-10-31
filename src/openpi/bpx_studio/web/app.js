@@ -668,7 +668,8 @@ async function show(job) {
     $("useSelectedInit").disabled = true;
   }
   const progress = job.progress || {};
-  $("progressText").textContent = `${progress.current ?? 0} / ${progress.total ?? "?"}`;
+  const progressCount = `${progress.current ?? 0} / ${progress.total ?? "?"}`;
+  $("progressText").textContent = progress.phase ? `${progress.phase} · ${progressCount}` : progressCount;
   $("progressPercent").textContent = `${Number(progress.percent || 0).toFixed(1)}%`;
   $("progressBar").value = progress.percent || 0;
   $("metricLoss").textContent = fmt(job.metrics?.loss);

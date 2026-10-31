@@ -13,10 +13,19 @@ _COUNTER = re.compile(
 )
 
 
-def parse_progress_line(line: str, *, total_units: int | None = None) -> dict[str, Any] | None:
+def parse_progress_line(
+    line: str, *, total_units: int | None = None, job_kind: str | None = None
+) -> dict[str, Any] | None:
     clean = _ANSI.sub("", line).replace("\r", "").strip()
     if not clean:
         return None
+    if job_kind == "normalize":
+        if clean.startswith("[BPX NORM] "):
+            return {"kind": "phase", "phase": clean.removeprefix("[BPX NORM] ")}
+        # Hugging Face emits separate download/cache tqdm bars. Those are NOT
+        # normalization progress, even when they report 80/80 or 100%.
+        if not clean.startswith("Computing stats:"):
+            return None
     match = _TRAIN_STEP.search(clean)
     if match:
         step = int(match.group("step"))
@@ -31,7 +40,10 @@ def parse_progress_line(line: str, *, total_units: int | None = None) -> dict[st
             "kind": "progress",
             "current": int(match.group("current")),
             "total": int(match.group("total")),
-            "percent": float(match.group("percent")),
+            # Computing all batches still leaves quantiles and the output save.
+            # Only JobManager's successful process exit may mark the job 100%.
+            "percent": min(99.9, float(match.group("percent"))) if job_kind == "normalize"
+            else float(match.group("percent")),
         }
     match = _COUNTER.search(clean)
     if match:

@@ -74,6 +74,18 @@ python scripts/verify_bpx_studio.py
 
 ## 推荐操作顺序
 
+### 归一化进度与启动诊断
+
+`Downloading data: 80/80`、`Generating train split: ... examples` 是 LeRobot/Hugging Face 初始化数据/缓存的日志，**不是归一化完成**，也不是本项目的训练/验证留出划分。Studio 只把 `Computing stats: ...` 计入归一化进度；保存文件并成功退出前最多显示99.9%，最终以任务`succeeded`和对应`norm_stats.json`为准。
+
+归一化任务会打印`[BPX NORM]`阶段：依赖导入 → Config/训练划分 → LeRobot加载和时间戳校验 → 数据加载器/设备 → 首批数据 → 统计汇总 → 保存。依赖/启动阶段超过60秒会自动输出执行堆栈；它是诊断提示，不会因为该提示终止任务。
+
+Studio为**归一化子进程**设置`JAX_PLATFORMS=cpu`与空的`CUDA_VISIBLE_DEVICES`，不再为了输入加载器的JAX设备/分片初始化访问GPU。RunningStats算法、动作变换、批量、worker数和训练/验证清单不变；训练任务仍使用用户选择的CUDA编号，不继承该子进程的CPU后端设置。未修改系统环境或依赖。命令行单独运行时可同样只对该命令设置`JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES= ...`。
+
+旧任务在更新代码后不会改变已启动的Python/设备初始化；仍挂起时先从页面终止该归一化任务，关闭/重启Studio并强制刷新页面，再创建新任务。运行中旧归一化任务的错误缓存进度会在Studio重启时从原日志重新解析；不会伪造其成功或删除任务记录。
+
+服务器回归：`.venv/bin/python -m pytest src/openpi/bpx_studio/normalize_progress_test.py -q`。本机仅做静态检查，真实卡顿是否由GPU初始化造成仍需新阶段日志/堆栈核实，不能把CPU后端规避等同于已诊断硬件故障。
+
 ### 只有物理 CPU1 可用的服务器
 
 用户报告双路服务器 CPU0 疑似故障时，先限制**新进程**只在 CPU1 上运行，而不是重装 PyTorch：

@@ -182,6 +182,10 @@ def build_normalize(values: Mapping[str, object]) -> CommandSpec:
     config = _name(str(values["config_name"]), "训练配置名")
     workers = _positive(int(values.get("workers", 32)), "workers", maximum=256)
     env = _data_environment({key: str(value) for key, value in values.items()})
+    # Statistics use NumPy, not model inference. Do not initialize the server's
+    # CUDA devices just to create the loader's otherwise-unused JAX sharding.
+    # This environment belongs ONLY to the normalization child process.
+    env.update(JAX_PLATFORMS="cpu", CUDA_VISIBLE_DEVICES="", PYTHONUNBUFFERED="1")
     return CommandSpec(
         argv=("uv", "run", "scripts/compute_norm_stats.py", "--config-name", config, "--num-workers", str(workers),
               *_validation_arguments(values, normalize=True)),
