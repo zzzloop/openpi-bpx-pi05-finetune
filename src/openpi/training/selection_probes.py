@@ -43,10 +43,24 @@ def counterfactual_squared_l2(left, right, active_dims=None) -> float:
     return float(np.sum(difference**2))
 
 
+def _probe_observation(data: dict):
+    """Materialize array leaves before typed, unbatched Observation creation.
+
+    Training collation and policy inference already convert scalar leaves to
+    arrays. Frozen single-frame probes bypass those paths: np.bool_ image masks
+    must become rank-zero bool ndarrays, without adding a batch axis or changing
+    any dtype/value. Keep the model's shape and dtype checks enabled.
+    """
+    import jax
+
+    from openpi.models.model import Observation
+
+    return Observation.from_dict(jax.tree.map(np.asarray, data))
+
+
 def prepare_suite(config, output: pathlib.Path, *, case_spec: pathlib.Path | None = None, max_cases: int = 16):
     """Server-side preparation, using the SAME repack/norm/tokenizer as training."""
     from openpi import transforms
-    from openpi.models import model as model_lib
     from openpi.training import data_loader, validation_split
     from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
 
@@ -156,7 +170,7 @@ def prepare_suite(config, output: pathlib.Path, *, case_spec: pathlib.Path | Non
             if not prompt:
                 continue
             transformed = pipeline({**copy.deepcopy(raw), "prompt": str(prompt)})
-            obs = model_lib.Observation.from_dict(transformed)
+            obs = _probe_observation(transformed)
             flat = _flatten(obs.to_dict())
             shared = {key: value for key, value in flat.items() if key not in ("tokenized_prompt", "tokenized_prompt_mask")}
             if common is None:

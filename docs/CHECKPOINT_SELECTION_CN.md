@@ -75,6 +75,22 @@ CF 使用的是 **平方 L2 的和，不是 RMS，也不是物理关节速度**�
 
 ## 服务器命令
 
+### 单帧相机 mask 的类型边界
+
+若准备Suite报`Observation.image_masks`类型错误，实际值为`numpy.bool_`，是准备代码跳过了训练组batch/推理输入中的数组化步骤，并不是数据或归一化文件损坏。单帧有效标记应为shape `()`、dtype `bool`的NumPy数组；新版本在构造Observation前对输入树执行`np.asarray`，不加batch轴、不改已有数组精度或值，也不关闭类型检查。不修改BpxInputs、训练损失或统计。
+
+该错误发生在输出目录创建前，更新代码后通常可以使用同一输出目录重新准备，无须重算归一化。若目录确实已存在，使用新的草稿目录，不覆盖或删除原文件。
+
+服务器可选回归：
+
+```bash
+JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
+.venv/bin/python -u -m openpi.bpx_studio.cpu_affinity --socket 1 -- \
+  .venv/bin/python -m pytest src/openpi/training/selection_probes_test.py -q
+```
+
+本机仅静态检查，未执行这些依赖测试或模型测试。
+
 本机不安装环境、不运行训练或测试。服务器先准备 suite（路径以你真实的分组清单为准）：
 
 可先在服务器执行纯 CPU 的指标与候选保留回归检查（不需要加载模型权重）：
