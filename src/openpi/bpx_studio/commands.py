@@ -224,11 +224,17 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
     mode = str(values.get("mode", "overwrite"))
     if mode not in {"overwrite", "resume"}:
         raise ValueError("训练模式只能是 overwrite 或 resume")
+    wandb_mode = str(values.get("wandb_mode", "offline"))
+    if wandb_mode not in {"offline", "online", "disabled"}:
+        raise ValueError("W&B 模式只能是 offline、online 或 disabled")
     experiment_dir = checkpoint_root / config / experiment
     if mode == "overwrite" and experiment_dir.exists():
         raise ValueError("实验目录已存在，请换一个实验名，或选择断点续训，避免覆盖 checkpoint")
     env = _data_environment({key: str(value) for key, value in values.items()})
     env.update(CUDA_VISIBLE_DEVICES=cuda_devices, XLA_PYTHON_CLIENT_MEM_FRACTION=f"{memory_fraction:.4g}")
+    # Optional cloud tracking must not block the default dashboard workflow.
+    # CheckpointManager creates this directory before wandb.init is called.
+    env.update(WANDB_MODE=wandb_mode, WANDB_DIR=str(experiment_dir))
     return CommandSpec(
         argv=(
             "uv",

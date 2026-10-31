@@ -110,6 +110,7 @@ class TrainRequest(DataEnvironment):
     keep_period: int = Field(default=25000, ge=1)
     checkpoint_limit: int | None = Field(default=None, ge=1, le=100)
     mode: Literal["overwrite", "resume"] = "overwrite"
+    wandb_mode: Literal["offline", "online", "disabled"] = "offline"
     validation_interval: int = Field(default=1000, ge=1)
     validation_batches: int = Field(default=16, ge=1, le=256)
     selection_suite: str = ""

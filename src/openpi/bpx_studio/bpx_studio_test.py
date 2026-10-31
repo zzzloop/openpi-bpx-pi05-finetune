@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 from types import SimpleNamespace
 
@@ -158,10 +159,36 @@ def test_train_command_preserves_known_two_gpu_contract(tmp_path: pathlib.Path) 
     )
     assert spec.env["CUDA_VISIBLE_DEVICES"] == "2,3"
     assert spec.env["XLA_PYTHON_CLIENT_MEM_FRACTION"] == "0.96"
+    assert spec.env["WANDB_MODE"] == "offline"
+    assert spec.env["WANDB_DIR"] == str(
+        checkpoint_root.resolve() / "pi05_bpx_full_low_mem_multitask_v2" / "bpx_multitask_v2_bs2"
+    )
     assert f"--checkpoint-base-dir={checkpoint_root.resolve()}" in spec.argv
     assert "--resume" in spec.argv
     assert "--checkpoint-limit=3" in spec.argv
     assert spec.total_units == 200000
+
+
+@pytest.mark.parametrize("mode", [None, "offline", "online", "disabled", "invalid"])
+def test_train_wandb_mode_is_validated_and_scoped_to_child(tmp_path, monkeypatch, mode):
+    root = _openpi_root(tmp_path / "openpi")
+    monkeypatch.setenv("WANDB_MODE", "online")
+    values = dict(openpi_root=str(root), config_name="config", exp_name="new_experiment",
+                  checkpoint_base_dir=str(tmp_path / "scratch" / "checkpoints"),
+                  cuda_devices="2,3", memory_fraction=.96, batch_size=2, num_train_steps=20000,
+                  fsdp_devices=2, save_interval=2000, keep_period=4000, checkpoint_limit=3, mode="overwrite")
+    if mode is not None:
+        values["wandb_mode"] = mode
+    if mode == "invalid":
+        with pytest.raises(ValueError, match="W&B"):
+            commands.build_train(values)
+        return
+    spec = commands.build_train(values)
+    assert spec.env["WANDB_MODE"] == (mode or "offline")
+    assert spec.env["WANDB_DIR"] == str((tmp_path / "scratch/checkpoints/config/new_experiment").resolve())
+    assert "--save-interval=2000" in spec.argv and "--keep-period=4000" in spec.argv
+    assert "--checkpoint-limit=3" in spec.argv
+    assert os.environ["WANDB_MODE"] == "online"
 
 
 def test_train_rejects_batch_not_divisible_by_devices(tmp_path: pathlib.Path) -> None:

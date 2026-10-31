@@ -86,6 +86,18 @@ Studio为**归一化子进程**设置`JAX_PLATFORMS=cpu`与空的`CUDA_VISIBLE_D
 
 服务器回归：`.venv/bin/python -m pytest src/openpi/bpx_studio/normalize_progress_test.py -q`。本机仅做静态检查，真实卡顿是否由GPU初始化造成仍需新阶段日志/堆栈核实，不能把CPU后端规避等同于已诊断硬件故障。
 
+### W&B 记录与云端 403
+
+仪表盘训练默认设置**子进程** `WANDB_MODE=offline`，不让可选的云端日志连接阻塞训练。模型训练页可选“离线记录 / 在线同步 / 关闭 W&B 记录”；在线模式需要用户明确选择，并自行具备服务权限和可用网络。API 未传该字段的旧页面/客户端同样默认离线；不改系统、父进程或其他项目的 W&B 设置，不修改已有 API key。
+
+`WANDB_DIR` 指向当前实验的 checkpoint 根目录（Orbax 在 W&B 初始化前创建），默认实际日志位于 `/scratch/bpx_datasets/checkpoints/<config>/<experiment>/wandb/`，不继续往代码目录或 `/home` 累积 W&B run 图像/日志。工作台原有 `monitoring/` 下的训练/验证 Loss、JSONL、CSV、图表、选模依据及最多3个模型策略独立保留。切换 W&B 模式不更改训练损失、数据、统计、GPU、batch/FSDP、保存频率或优化器。
+
+2026-10-31 的日志已在启动约8秒后越过 GPU 初始化、创建 Orbax 管理器，随后在 `init_wandb → wandb.init` 得到 `failed to upsert bucket: 403 Forbidden`。这是云端请求拒绝，不是数据损坏或显存不足；403 的具体网络/账号/权限原因仅凭该日志不能区分。离线模式是解除云端依赖，不声称修好了云端授权。
+
+锁定 SDK 0.19.11 的依据：[离线初始化跳过登录](https://github.com/wandb/wandb/blob/v0.19.11/wandb/sdk/wandb_init.py)、[环境变量及 run 目录实现](https://github.com/wandb/wandb/blob/v0.19.11/wandb/sdk/wandb_settings.py)。离线 run 不自动上传，后续手动同步需单独授权；离线续训可能产生独立 W&B 日志分段，不应将云端 run 的 resume 等同于训练优化器恢复。训练 resume 仍以完整 Orbax checkpoint 和原 Config/划分/选模协议为准。若 Config 已设置 `wandb_enabled=False`，原训练入口仍优先关闭 W&B。
+
+此处403发生在数据加载和首步优化前，日志显示0个 checkpoint；重试应使用“生成未使用的实验名”并选择新实验，不要为复用空目录删除文件或误选 resume。拉取更新后重启 CPU1 仪表盘、强刷页面，W&B选“离线记录”；无需重算归一化或重建 Suite。新任务日志应显示 `WANDB_MODE=offline` 及当前实验下的 `WANDB_DIR`。命令行直接运行 `train.py` 的原默认行为没有改动，若要同样离线需自行为该次命令设置 `WANDB_MODE=offline`，CPU1服务器仍应使用原CPU绑定包装器。
+
 ### 只有物理 CPU1 可用的服务器
 
 用户报告双路服务器 CPU0 疑似故障时，先限制**新进程**只在 CPU1 上运行，而不是重装 PyTorch：

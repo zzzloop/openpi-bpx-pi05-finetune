@@ -33,6 +33,8 @@ def main() -> None:
                 log.write(f"[BPX] Inherited logical CPU affinity: {cpus}\n")
             if environment.get("HWLOC_COMPONENTS"):
                 log.write(f"[BPX] HWLOC_COMPONENTS={environment['HWLOC_COMPONENTS']}\n")
+            if environment.get("WANDB_MODE"):
+                log.write(f"[BPX] WANDB_MODE={environment['WANDB_MODE']}; WANDB_DIR={environment.get('WANDB_DIR', '')}\n")
             log.flush()
             process = subprocess.Popen(
                 spec["argv"], cwd=spec["cwd"], env=environment, stdout=log, stderr=subprocess.STDOUT, text=True
