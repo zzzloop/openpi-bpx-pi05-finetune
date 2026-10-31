@@ -108,7 +108,17 @@ def test_estimated_feedback_config_keeps_original_training_objective_and_own_ide
     assert estimated.data.repo_id == "bpx/bpx_v1_base_estimated_v001"
     assert estimated.data.base_config.balance_by_task is False
     assert estimated.save_interval == 5000 and estimated.keep_period == 25000
+    assert estimated.checkpoint_limit == 3
+    assert original.checkpoint_limit is None
     assert "estimated" in estimated.policy_metadata["state_provenance"]
+
+
+def test_checkpoint_limit_requires_a_resume_slot_and_candidate_slot():
+    estimated = config_module.get_config("pi05_bpx_full_low_mem_v1_base_estimated")
+    with pytest.raises(ValueError, match="checkpoint_limit"):
+        dataclasses.replace(estimated, checkpoint_limit=0)
+    with pytest.raises(ValueError, match="slot"):
+        dataclasses.replace(estimated, checkpoint_limit=1, selection_suite="suite.json")
 
 
 def test_bpx_multitask_v2_config_is_independent_and_task_balanced():

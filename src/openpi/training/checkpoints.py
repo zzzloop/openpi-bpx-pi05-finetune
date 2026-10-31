@@ -18,8 +18,15 @@ import openpi.training.utils as training_utils
 
 
 def initialize_checkpoint_dir(
-    checkpoint_dir: epath.Path | str, *, keep_period: int | None, overwrite: bool, resume: bool
+    checkpoint_dir: epath.Path | str,
+    *,
+    keep_period: int | None,
+    overwrite: bool,
+    resume: bool,
+    checkpoint_limit: int | None = None,
+    selection_keep: int | None = None,
 ) -> tuple[ocp.CheckpointManager, bool]:
+    max_to_keep, effective_period, _ = retention_budget(checkpoint_limit, keep_period, selection_keep)
     checkpoint_dir = epath.Path(checkpoint_dir).resolve()
     resuming = False
     if checkpoint_dir.exists():
@@ -45,8 +52,8 @@ def initialize_checkpoint_dir(
             "params": ocp.PyTreeCheckpointHandler(),
         },
         options=ocp.CheckpointManagerOptions(
-            max_to_keep=1,
-            keep_period=keep_period,
+            max_to_keep=max_to_keep,
+            keep_period=effective_period,
             create=False,
             async_options=ocp.AsyncOptions(timeout_secs=7200),
         ),
@@ -60,6 +67,28 @@ def initialize_checkpoint_dir(
         resuming = False
 
     return mngr, resuming
+
+
+def retention_budget(
+    limit: int | None,
+    keep_period: int | None,
+    selection_keep: int | None,
+) -> tuple[int, int | None, int | None]:
+    """Return ordinary count, periodic preservation, and weight-archive count.
+
+    With selection reserve one COMPLETE optimizer checkpoint for resume; the
+    remaining slots hold online multi-objective candidates. Never delete a
+    checkpoint before its replacement has committed: Orbax owns that lifecycle.
+    """
+    if limit is None:
+        return 1, keep_period, selection_keep
+    if type(limit) is not int or limit < 1:
+        raise ValueError("checkpoint_limit must be a positive integer")
+    if selection_keep is not None:
+        if limit < 2 or selection_keep < 1:
+            raise ValueError("Selection requires latest resume plus at least one candidate slot")
+        return 1, None, min(selection_keep, limit - 1)
+    return limit, None, None
 
 
 def save_state(

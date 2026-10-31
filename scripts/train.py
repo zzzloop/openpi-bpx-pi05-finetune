@@ -257,7 +257,16 @@ def main(config: _config.TrainConfig):
         keep_period=config.keep_period,
         overwrite=config.overwrite,
         resume=config.resume,
+        checkpoint_limit=config.checkpoint_limit,
+        selection_keep=config.selection_keep if config.selection_suite else None,
     )
+    ordinary_keep, _, archive_keep = _checkpoints.retention_budget(
+        config.checkpoint_limit, config.keep_period, config.selection_keep if config.selection_suite else None,
+    )
+    if config.checkpoint_limit is not None:
+        logging.info("Checkpoint retention: total <= %d after save/selection; latest resumable=%d, "
+                     "selected archives <= %d; keep_period disabled (save_interval unchanged)",
+                     config.checkpoint_limit, ordinary_keep, archive_keep or 0)
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
     if resuming and not config.validation_manifest and (config.checkpoint_dir / "monitoring/validation_protocol.json").exists():
         raise ValueError("This experiment uses held-out validation; resume with the same validation manifest")
@@ -422,19 +431,21 @@ def main(config: _config.TrainConfig):
         probe_runtime = _selection_probes.ProbeRuntime(
             config, data_loader.data_config(), train_state.model_def, train_state_sharding.params, data_sharding, mesh)
         selection_identity = {"schema_version": 1, "suite_sha256": probe_runtime.digest,
-                              "validation": identity, "keep": config.selection_keep,
+                              "validation": identity, "keep": archive_keep,
                               "denoise_steps": config.selection_denoise_steps, "seed": config.seed,
                               "action_names": list(config.monitoring_action_names),
                               "inference_params": "ema" if train_state.ema_params is not None else "current",
                               "initial_checkpoint": config.init_checkpoint,
                               "selection_policy": probe_runtime.manifest.get("selection_policy", {}),
                               "loss_function": "UNCHANGED compute_loss; diagnostics never enter gradients"}
+        if config.checkpoint_limit is not None:
+            selection_identity["checkpoint_limit"] = config.checkpoint_limit
         selection_identity.update(
             probe_code_sha256=hashlib.sha256(pathlib.Path(_selection_probes.__file__).read_bytes()).hexdigest(),
             selector_code_sha256=hashlib.sha256(pathlib.Path(_selection.__file__).read_bytes()).hexdigest(),
             velocity_model_code_sha256=hashlib.sha256(pathlib.Path(_model.__file__).with_name("pi0.py").read_bytes()).hexdigest())
         selector = _selection.SelectionHistory(
-            pathlib.Path(config.checkpoint_dir), selection_identity, keep=config.selection_keep,
+            pathlib.Path(config.checkpoint_dir), selection_identity, keep=archive_keep,
             start_step=start_step, resume=resuming, gates=probe_runtime.manifest.get("gates"),
             external_assessments=probe_runtime.manifest.get("external_assessments"))
         _selection.atomic_json(selector.root / "training_config.json", {"config_repr": repr(config),

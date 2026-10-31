@@ -585,6 +585,9 @@ class TrainConfig:
     save_interval: int = 1000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
+    # Optional TOTAL retention budget: latest resumable + selected weight archives.
+    # Overrides periodic preservation, not save_interval. None preserves old recipes.
+    checkpoint_limit: int | None = None
 
     # If true, will overwrite the checkpoint directory if it already exists.
     overwrite: bool = False
@@ -637,6 +640,11 @@ class TrainConfig:
             raise ValueError("init_checkpoint starts a new optimizer; do not combine it with resume")
         if self.selection_keep < 1 or self.selection_denoise_steps < 1:
             raise ValueError("Selection candidate count and denoising steps must be positive")
+        if self.checkpoint_limit is not None:
+            if self.checkpoint_limit < 1:
+                raise ValueError("checkpoint_limit must be positive")
+            if self.selection_suite and self.checkpoint_limit < 2:
+                raise ValueError("Checkpoint selection needs a slot for latest resume and at least one candidate")
         if self.selection_suite and not self.validation_manifest:
             raise ValueError("Checkpoint selection requires an immutable grouped validation manifest")
         if self.monitoring_enabled and (
@@ -966,6 +974,7 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_bpx_full_low_mem_v1_base_estimated",
+        checkpoint_limit=3,
         model=pi0_config.Pi0Config(pi05=True, action_horizon=30),
         data=LeRobotBpxDataConfig(
             repo_id="bpx/bpx_v1_base_estimated_v001",

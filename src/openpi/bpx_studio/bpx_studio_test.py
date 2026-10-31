@@ -152,6 +152,7 @@ def test_train_command_preserves_known_two_gpu_contract(tmp_path: pathlib.Path) 
             "fsdp_devices": 2,
             "save_interval": 5000,
             "keep_period": 25000,
+            "checkpoint_limit": 3,
             "mode": "resume",
         }
     )
@@ -159,6 +160,7 @@ def test_train_command_preserves_known_two_gpu_contract(tmp_path: pathlib.Path) 
     assert spec.env["XLA_PYTHON_CLIENT_MEM_FRACTION"] == "0.96"
     assert f"--checkpoint-base-dir={checkpoint_root.resolve()}" in spec.argv
     assert "--resume" in spec.argv
+    assert "--checkpoint-limit=3" in spec.argv
     assert spec.total_units == 200000
 
 

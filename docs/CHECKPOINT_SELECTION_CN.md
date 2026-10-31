@@ -67,7 +67,7 @@ CF 使用的是 **平方 L2 的和，不是 RMS，也不是物理关节速度**�
 3. 留空指令对 JSON 时，程序从持出组挑选固定起始帧，用其他数据任务的语言生成**未复核**反事实模板。它不证明图中两个目标同时存在，因此只能用于诊断，不能当成严格语义 benchmark。
 4. 在服务器查看生成的 editable_case_spec.json，结合原视频确认每张场景中两条不同指令都有意义。填写真正不同措辞、但同义的 paraphrase_prompt。确认后设置 semantic_reviewed=true。不同指令分词后相同（如被截断）会拒绝准备。
 5. 换一个新的输出目录，用人工复核 JSON 重建。原 suite.json/probes.npz 不要原地改；它们与划分、Config、模型形状、归一化和真实噪声数组绑定。
-6. 界面中“启用的选模 Suite”填正式 suite.json，保留候选默认 3，去噪步数默认 10。留空时不启用选模，旧训练行为保持。
+6. 界面中“启用的选模 Suite”填正式 suite.json，去噪步数默认 10。Checkpoint 总保留上限默认 3：启用选模时保留最新可续训完整模型 1 个 + 优选权重候选最多 2 个。Suite 留空不启用选模，此时总上限 3 表示保留最近 3 个完整模型。旧实验续训需保持原保留策略；此前未启用总上限的，清空该输入框。
 7. 使用新实验名训练。开始优化前记录一次初始化基线；之后在每次原有 save_interval 与末尾保存时，等待真实保存完成，再评估实际推理使用的 EMA 参数（若启用 EMA），否则评估 current 参数。普通未启用选模的实验仍保留原验证模式。
 8. 查看任务详情下方的多指标图、推荐路径与预警。推荐 step 与“最低验证 loss step”分开显示；不会自动启动下一轮训练。
 
@@ -172,7 +172,28 @@ JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
 
 ## 候选保存与下一轮微调
 
-归档使用同文件系统的硬链接保留 params/assets，与不可变的 Orbax 保存结果共享数据块。普通 Checkpoint 后续被原有保留规则清理时，候选仍可读取。只删除超过保留预算且带本程序 owner_run 标记的候选链接，不改用户原始 Checkpoint。若文件系统不支持硬链接，报错并保留原模型，不暗中复制几十 GB 权重。
+归档使用同文件系统的硬链接保留 params/assets，与不可变的 Orbax 保存结果共享数据块。普通 Checkpoint 后续被保留规则清理时，候选仍可读取。选模器只删除超过预算且带本程序 owner_run 标记的候选链接；普通完整 Checkpoint 始终由 Orbax 管理，不手工删除正在写入的模型。若文件系统不支持硬链接，报错并保留原模型，不暗中复制几十 GB 权重。
+
+### 总量上限与续训（2026-10-31）
+
+新增 `--checkpoint-limit=3`，统计**本次实验内**普通完整模型与优选权重归档的合计数量，不是额外再保留 3 个候选。启用 Suite 时，Orbax 只保留最新完整模型 1 个（含优化器，可 resume），候选最多 `min(selection_keep, 2)` 个；候选按已有多指标在线筛选，不是按最新或只按 val loss。即使“候选保留上限”仍填旧值 3，也自动限制为 2。未启用 Suite 时保留最近 3 个完整模型。
+
+总上限优先于 `keep_period`，避免 25k 周期模型无限累积；`save_interval=5000` 不变。只有新模型成功提交后才由 Orbax 清理旧普通模型，保存/归档过程中允许临时文件与短暂超额，**不会为卡住瞬时数量而先删除唯一可续训模型**。每次保存与选模完成后最多 3 个；评估失败仍保留最新完整模型和之前至多 2 个候选。硬链接不额外复制权重块。日志、图表、Suite 和指标历史不算模型，不因该上限删除。
+
+预算是在线有界保留：已被淘汰的权重不能日后仅凭保留的指标复活，不等于事后全历史最优搜索。保存失败时旧模型仍在；选模失败时不推荐未评分模型。其他实验、原始数据、base 权重均不受影响。旧实验恢复时不要悄悄更换保留策略或 Suite；新策略用于新实验。恢复旧的大目录不会启动时立即删历史模型，待下一次成功保存再由管理器执行策略。
+
+仪表盘默认总上限 3；命令行仅 `pi05_bpx_full_low_mem_v1_base_estimated` 预置 3，其他旧 Config 默认 `None`，无显式参数时保持旧保留方式。训练损失、数据集、归一化、学习率、batch/FSDP 不变。
+
+服务器回归检查（本机不运行 OpenPI 环境）：
+
+```bash
+JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+  src/openpi/training/checkpoint_retention_test.py \
+  src/openpi/training/bpx_config_test.py \
+  src/openpi/training/checkpoint_selection_test.py -q
+```
+
+CPU1 专用机器需在已绑定 CPU1 的终端执行，或使用现有 `openpi.bpx_studio.cpu_affinity --socket 1 -- ...` 入口；不需要重新安装环境。回归包含微小数组的真实 Orbax 异步保存、总量统计、早期候选硬链接存活及旧实验保护，不加载 base 权重或训练机器人模型。
 
 recommended.json 的 checkpoint_path 可直接用于 serve_policy.py 的 --policy.dir。下一轮微调使用新的实验名，在原完整训练命令中增加：
 

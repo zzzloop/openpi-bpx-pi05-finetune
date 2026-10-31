@@ -204,6 +204,13 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
     fsdp_devices = _positive(int(values["fsdp_devices"]), "FSDP 设备数", maximum=64)
     save_interval = _positive(int(values["save_interval"]), "保存间隔")
     keep_period = _positive(int(values["keep_period"]), "长期保留间隔")
+    checkpoint_limit = values.get("checkpoint_limit")
+    retention_arguments = ()
+    if checkpoint_limit is not None:
+        checkpoint_limit = _positive(int(checkpoint_limit), "Checkpoint 总保留上限", maximum=100)
+        if str(values.get("selection_suite", "")).strip() and checkpoint_limit < 2:
+            raise ValueError("选模至少需要两个名额：最新可续训模型 + 一个候选")
+        retention_arguments = (f"--checkpoint-limit={checkpoint_limit}",)
     cuda_devices = str(values["cuda_devices"]).strip()
     if not _CUDA_DEVICES.fullmatch(cuda_devices):
         raise ValueError("CUDA 设备必须写成逗号分隔的非负整数; 例如 2,3")
@@ -235,6 +242,7 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
             f"--fsdp-devices={fsdp_devices}",
             f"--save-interval={save_interval}",
             f"--keep-period={keep_period}",
+            *retention_arguments,
             f"--{mode}",
             *_validation_arguments(values),
             *_selection_arguments(values),

@@ -108,6 +108,7 @@ class TrainRequest(DataEnvironment):
     fsdp_devices: int = Field(default=2, ge=1)
     save_interval: int = Field(default=5000, ge=1)
     keep_period: int = Field(default=25000, ge=1)
+    checkpoint_limit: int | None = Field(default=None, ge=1, le=100)
     mode: Literal["overwrite", "resume"] = "overwrite"
     validation_interval: int = Field(default=1000, ge=1)
     validation_batches: int = Field(default=16, ge=1, le=256)
