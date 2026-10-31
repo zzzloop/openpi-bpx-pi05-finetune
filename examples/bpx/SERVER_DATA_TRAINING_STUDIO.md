@@ -102,13 +102,35 @@ bash scripts/start_bpx_studio_cpu1.sh
 ```
 
 此入口读取 Linux `physical_package_id`，选取当前进程被允许使用的 CPU1 在线逻辑核心；不猜核心编号的前后半段，不混淆 CPU 插槽、逻辑 CPU 和 NUMA 节点。
-找不到 CPU1 或绑定失败就明确退出，**不会退回 CPU0**。启动日志打印实际核心列表；仪表盘之后新建的归一化、训练及其 workers 继承此绑定，任务日志也记录实际 affinity。
+找不到 CPU1 或绑定失败就明确退出，不主动退回 CPU0。启动日志打印实际核心列表；仪表盘之后新建的归一化、训练及其 workers 继承此绑定，任务日志也记录实际 affinity。注意：普通 affinity 不是 cgroup 硬隔离，底层库仍可能主动改绑；下述补丁针对本次已确认的 hwloc x86 探测越界。
 任意插槽可用 `BPX_CPU_SOCKET=<插槽ID> bash scripts/start_bpx_studio.sh`；未指定时原启动方式不变。
 手动执行其他程序也可以使用上面的 `cpu_affinity --socket 1 -- <命令>` 包装器。
 
 先在旧页面终止挂起的归一化任务，再关闭旧页面服务、重启并新建归一化任务；**已有独立任务不会被自动迁移、停止或改变 CPU 绑定**。
 此功能只限制运行 CPU，不修改 GPU 编号、batch、workers、数据划分、归一化算法、训练损失、依赖或系统配置；不设置 NUMA 内存策略。
 CPU0 故障目前为用户提供的信息，尚无硬件诊断。必须以 CPU1 单独导入和实际归一化结果验收；如果仍超时，再取原生调用栈，不能声称硬件问题已修好。
+
+#### GPU 初始化仍卡住：hwloc 主动改绑（2026-10-31）
+
+现场证据：训练主线程在 XLA `PlatformUtil::GetStreamExecutors` 等待 LWP 3800132；该线程的 `Cpus_allowed_list: 0`，原生栈为 `CudaExecutor::Init → ReadNumaNode → NUMANumNodes → hwloc_topology_load → hwloc_x86_discover → hwloc_look_x86 → hwloc_linux_set_tid_cpubind → sched_setaffinity`。虽然父进程绑定 CPU1（28–55、84–111），hwloc 的 x86/CPUID 探测会临时自行改绑，因此仅依靠继承 affinity 不足。已确认阻塞路径，不据此认定 CPU0 具体硬件故障。
+
+修复：显式 `cpu_affinity --socket ...` 包装器在启动新程序前，将 `HWLOC_COMPONENTS` 加入 `-x86`，保留其他原有组件设置。只跳过会主动绑核的 x86 探测，Linux/sysfs 拓扑后端仍可用；不切换 CPU 训练，不关闭 CUDA，不改 batch、FSDP、显存比例、损失函数或数据。普通未使用绑定包装器的启动不设置该变量。不写 `.bashrc`、系统配置或虚拟环境，不重装 hwloc/JAX。
+
+依据：[hwloc 2.x 组件选择文档](https://github.com/open-mpi/hwloc/blob/hwloc-2.10.0/doc/hwloc.doxy)及[x86 后端实现](https://github.com/open-mpi/hwloc/blob/hwloc-2.10.0/hwloc/topology-x86.c)。`-x86` 是禁用拓扑发现组件，不是禁用 x86 指令集。
+
+旧进程已初始化中的 hwloc 不会因更新文件或另开终端 export 而改变。先从仪表盘终止旧的挂起训练，确认目标进程退出，再拉取代码；不用重算统计或重建 Suite。不要重置共享服务器 GPU，不要停止别人的进程。
+
+单独验证 GPU2/3 初始化（在服务器执行，不加载模型、不读数据、不预分配大块显存；超时只结束这个测试进程）：
+
+```bash
+cd /home/kemove/zzk_data/openpi-bpx-pi05-finetune
+timeout -k 5s 90s .venv/bin/python -u -m openpi.bpx_studio.cpu_affinity \
+  --socket 1 -- env CUDA_VISIBLE_DEVICES=2,3 JAX_PLATFORMS=cuda \
+  XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python -u -c \
+  'import faulthandler; faulthandler.dump_traceback_later(30,repeat=True); import jax; d=jax.devices(); assert len(d)==2 and all(x.platform=="gpu" for x in d),d; print("TWO-GPU INIT PASS",d,flush=True); faulthandler.cancel_dump_traceback_later()'
+```
+
+通过后，关闭旧仪表盘服务，再执行 `bash scripts/start_bpx_studio_cpu1.sh`，强刷页面并启动新训练任务。新启动日志与任务日志应有 `HWLOC_COMPONENTS=-x86`。GPU 2、3 和训练参数保持原选择；用新实验名避免覆盖已有输出。补丁在本机只做静态检查，是否完全解除本机房阻塞须以上述服务器验证和实际训练 step 推进为准。
 
 服务器回归（本机只做静态语法检查，不运行训练/依赖测试）：
 

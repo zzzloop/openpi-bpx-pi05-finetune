@@ -31,6 +31,8 @@ def main() -> None:
             if hasattr(os, "sched_getaffinity"):
                 cpus = ",".join(str(cpu) for cpu in sorted(os.sched_getaffinity(0)))
                 log.write(f"[BPX] Inherited logical CPU affinity: {cpus}\n")
+            if environment.get("HWLOC_COMPONENTS"):
+                log.write(f"[BPX] HWLOC_COMPONENTS={environment['HWLOC_COMPONENTS']}\n")
             log.flush()
             process = subprocess.Popen(
                 spec["argv"], cwd=spec["cwd"], env=environment, stdout=log, stderr=subprocess.STDOUT, text=True

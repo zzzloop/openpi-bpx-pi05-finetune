@@ -2,6 +2,7 @@
 
 Socket IDs are physical_package_id values, not logical CPU or NUMA node IDs.
 Only the new process and its children are affected; no host settings change.
+Disable hwloc's x86 probe, which temporarily rebinds threads outside this mask.
 """
 
 from __future__ import annotations
@@ -64,6 +65,16 @@ def main() -> None:
         # and an audit label persist in the new program and all its children.
         environment.pop("BPX_CPU_SOCKET", None)
         environment["BPX_BOUND_CPU_SOCKET"] = str(args.socket)
+        # sched affinity is not a cgroup fence: hwloc's CPUID discovery can
+        # temporarily bind a native worker to CPU0 anyway. Disable just that
+        # component BEFORE importing JAX/CUDA; Linux/sysfs discovery remains.
+        # Keep other user-selected components, and never change the parent env.
+        components = [part.strip() for part in environment.get("HWLOC_COMPONENTS", "").split(",") if part.strip()]
+        if "-x86" not in components:
+            components.insert(0, "-x86")
+        environment["HWLOC_COMPONENTS"] = ",".join(components)
+        print(f"[BPX CPU] HWLOC_COMPONENTS={environment['HWLOC_COMPONENTS']}; x86 CPUID rebinding probe disabled.",
+              flush=True)
         os.execvpe(command[0], command, environment)
     except (OSError, ValueError) as error:
         print(f"[ERROR] CPU socket launch failed: {error}", file=sys.stderr, flush=True)

@@ -61,6 +61,7 @@ def test_cli_execs_after_binding_and_consumes_launcher_selector(monkeypatch: pyt
     monkeypatch.setattr(cpu_affinity.sys, "argv", ["cpu_affinity", "--socket", "1", "--", "python", "-V"])
     monkeypatch.setenv("BPX_CPU_SOCKET", "1")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3")
+    monkeypatch.delenv("HWLOC_COMPONENTS", raising=False)
     monkeypatch.setattr(cpu_affinity, "bind_socket", lambda socket: {1, 3})
     captured = []
     monkeypatch.setattr(cpu_affinity.os, "execvpe", lambda file, argv, env: captured.append((file, argv, env)))
@@ -70,6 +71,30 @@ def test_cli_execs_after_binding_and_consumes_launcher_selector(monkeypatch: pyt
     assert "BPX_CPU_SOCKET" not in env
     assert env["BPX_BOUND_CPU_SOCKET"] == "1"
     assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
+    assert env["HWLOC_COMPONENTS"] == "-x86"
+    assert "HWLOC_COMPONENTS" not in cpu_affinity.os.environ
+
+
+@pytest.mark.parametrize(
+    ("components", "expected"),
+    [("", "-x86"), ("linux", "-x86,linux"), ("-pci", "-x86,-pci"),
+     ("linux,stop", "-x86,linux,stop"), ("-x86,-pci", "-x86,-pci")],
+)
+def test_cli_disables_only_x86_and_preserves_other_environment(monkeypatch, components, expected):
+    from openpi.bpx_studio import cpu_affinity
+
+    monkeypatch.setattr(cpu_affinity.sys, "argv", ["cpu_affinity", "--socket", "1", "--", "python", "-V"])
+    monkeypatch.setenv("HWLOC_COMPONENTS", components)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3")
+    monkeypatch.setenv("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.96")
+    monkeypatch.setattr(cpu_affinity, "bind_socket", lambda socket: {28, 29, 84, 85})
+    captured = []
+    monkeypatch.setattr(cpu_affinity.os, "execvpe", lambda file, argv, env: captured.append(env))
+    cpu_affinity.main()
+    assert captured[0]["HWLOC_COMPONENTS"] == expected
+    assert captured[0]["CUDA_VISIBLE_DEVICES"] == "2,3"
+    assert captured[0]["XLA_PYTHON_CLIENT_MEM_FRACTION"] == "0.96"
+    assert cpu_affinity.os.environ["HWLOC_COMPONENTS"] == components
 
 
 def test_cli_does_not_exec_after_binding_error(monkeypatch: pytest.MonkeyPatch) -> None:
