@@ -84,7 +84,7 @@ class SpikeRequest(BaseModel):
 class NormalizeRequest(DataEnvironment):
     openpi_root: str
     config_name: str
-    workers: int = Field(default=32, ge=1, le=256)
+    workers: int = Field(default=32, ge=0, le=256)
 
 
 class Hdf5ExportRequest(BaseModel):

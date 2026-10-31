@@ -86,6 +86,16 @@ Studio为**归一化子进程**设置`JAX_PLATFORMS=cpu`与空的`CUDA_VISIBLE_D
 
 服务器回归：`.venv/bin/python -m pytest src/openpi/bpx_studio/normalize_progress_test.py -q`。本机仅做静态检查，真实卡顿是否由GPU初始化造成仍需新阶段日志/堆栈核实，不能把CPU后端规避等同于已诊断硬件故障。
 
+#### 已进入 Computing stats 但卡在 spawn / 等待首批数据
+
+若主线程堆栈停在`multiprocessing/popen_spawn_posix.py::_launch`和`torch.utils.data.dataloader`的worker启动，而进度一直0，表示尚在多进程启动通信中；仅凭主进程栈不能断言是pickle体积、子进程导入、内存压力或某个库的最终根因。
+
+当前最小兼容处理：终止该归一化任务，在**归一化页**把`DataLoader workers`明确填成 **0**，再创建新任务。0表示主进程读取，不启动loader子进程；不是0个样本或跳过数据。CPU1绑定和CPU后端保持；原来的Config、验证清单、batch、动作变换、帧/episode选择、顺序及RunningStats算法都不改，不添加max-frames。不把训练的worker或GPU参数一起更改。
+
+此模式通常比正常并行读取慢，但绕过本次已确认的spawn阻塞路径；如果数据本身有异常，会直接在主进程显示更清楚的堆栈。它不是对所有多进程启动失败的根因修复，不应未经新日志验证就声称整次统计通过。后续优化并行需单独验证，不能直接改成fork来规避，避免在已初始化的JAX/线程环境中引入新的死锁风险。
+
+已有版本CLI已支持0；若尚未更新网页，也可从CPU1包装器执行原来的归一化命令，仅把`--num-workers`改为0，并保持CPU环境、数据路径和validation-manifest不变。新版网页/API/命令构造均允许0，默认32及用户已有设置不被静默改写。
+
 ### 只有物理 CPU1 可用的服务器
 
 用户报告双路服务器 CPU0 疑似故障时，先限制**新进程**只在 CPU1 上运行，而不是重装 PyTorch：

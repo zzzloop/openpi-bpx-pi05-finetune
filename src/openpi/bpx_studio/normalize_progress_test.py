@@ -74,3 +74,36 @@ def test_normalize_cpu_environment_does_not_mutate_parent_or_train(monkeypatch, 
 
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "2,3" and os.environ["JAX_PLATFORMS"] == "cuda"
     assert "--num-workers" in result.argv and "32" in result.argv
+
+
+@pytest.mark.parametrize("workers", [0, 16, 32, 256])
+def test_normalize_worker_count_accepts_zero_and_preserves_requested_value(tmp_path, workers):
+    from openpi.bpx_studio.api import NormalizeRequest
+    from openpi.bpx_studio.commands import build_normalize
+
+    (tmp_path / "scripts").mkdir()
+    for name in ("train.py", "serve_policy.py", "compute_norm_stats.py"):
+        (tmp_path / "scripts" / name).touch()
+    (tmp_path / "pyproject.toml").touch()
+    request = NormalizeRequest(openpi_root=str(tmp_path), config_name="test", workers=workers)
+    command = build_normalize(request.model_dump())
+    index = command.argv.index("--num-workers")
+    assert command.argv[index + 1] == str(workers)
+    assert "--max-frames" not in command.argv
+
+
+@pytest.mark.parametrize("workers", [-1, 257])
+def test_normalize_worker_count_rejects_invalid_values(tmp_path, workers):
+    from pydantic import ValidationError
+
+    from openpi.bpx_studio.api import NormalizeRequest
+    from openpi.bpx_studio.commands import build_normalize
+
+    with pytest.raises(ValidationError):
+        NormalizeRequest(openpi_root=str(tmp_path), config_name="test", workers=workers)
+    (tmp_path / "scripts").mkdir()
+    for name in ("train.py", "serve_policy.py", "compute_norm_stats.py"):
+        (tmp_path / "scripts" / name).touch()
+    (tmp_path / "pyproject.toml").touch()
+    with pytest.raises(ValueError, match="0 到 256"):
+        build_normalize({"openpi_root": str(tmp_path), "config_name": "test", "workers": workers})
