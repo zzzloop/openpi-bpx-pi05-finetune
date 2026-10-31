@@ -23,9 +23,15 @@ def main() -> None:
     log_path, exit_path = pathlib.Path(spec["log_path"]), pathlib.Path(spec["exit_path"])
     environment = os.environ.copy()
     environment.update(spec.get("env", {}))
+    environment.setdefault("PYTHONUNBUFFERED", "1")
     return_code, error = 127, ""
     try:
         with log_path.open("a", encoding="utf-8", buffering=1) as log:
+            log.write(f"[BPX] Launching task at {datetime.now(UTC).isoformat()}\n")
+            if hasattr(os, "sched_getaffinity"):
+                cpus = ",".join(str(cpu) for cpu in sorted(os.sched_getaffinity(0)))
+                log.write(f"[BPX] Inherited logical CPU affinity: {cpus}\n")
+            log.flush()
             process = subprocess.Popen(
                 spec["argv"], cwd=spec["cwd"], env=environment, stdout=log, stderr=subprocess.STDOUT, text=True
             )

@@ -74,6 +74,36 @@ python scripts/verify_bpx_studio.py
 
 ## 推荐操作顺序
 
+### 只有物理 CPU1 可用的服务器
+
+用户报告双路服务器 CPU0 疑似故障时，先限制**新进程**只在 CPU1 上运行，而不是重装 PyTorch：
+
+```bash
+cd ~/zzk_data/openpi-bpx-pi05-finetune
+
+# 先单独验证导入；不读数据、不加载模型，最长等待约50秒。
+timeout -k 5s 45s .venv/bin/python -u -m openpi.bpx_studio.cpu_affinity \
+  --socket 1 -- .venv/bin/python -u -c 'import torch; print("TORCH IMPORT PASS", torch.__version__)'
+
+# 验证通过后，关闭旧仪表盘，再用这个入口启动。
+bash scripts/start_bpx_studio_cpu1.sh
+```
+
+此入口读取 Linux `physical_package_id`，选取当前进程被允许使用的 CPU1 在线逻辑核心；不猜核心编号的前后半段，不混淆 CPU 插槽、逻辑 CPU 和 NUMA 节点。
+找不到 CPU1 或绑定失败就明确退出，**不会退回 CPU0**。启动日志打印实际核心列表；仪表盘之后新建的归一化、训练及其 workers 继承此绑定，任务日志也记录实际 affinity。
+任意插槽可用 `BPX_CPU_SOCKET=<插槽ID> bash scripts/start_bpx_studio.sh`；未指定时原启动方式不变。
+手动执行其他程序也可以使用上面的 `cpu_affinity --socket 1 -- <命令>` 包装器。
+
+先在旧页面终止挂起的归一化任务，再关闭旧页面服务、重启并新建归一化任务；**已有独立任务不会被自动迁移、停止或改变 CPU 绑定**。
+此功能只限制运行 CPU，不修改 GPU 编号、batch、workers、数据划分、归一化算法、训练损失、依赖或系统配置；不设置 NUMA 内存策略。
+CPU0 故障目前为用户提供的信息，尚无硬件诊断。必须以 CPU1 单独导入和实际归一化结果验收；如果仍超时，再取原生调用栈，不能声称硬件问题已修好。
+
+服务器回归（本机只做静态语法检查，不运行训练/依赖测试）：
+
+```bash
+.venv/bin/python -m pytest src/openpi/bpx_studio/cpu_affinity_test.py -q
+```
+
 ### 毛刺算法与复核
 
 `isolated-excursion-v2` 使用逐维、原始单位的相邻帧跳变量，不按所有关节共用一个阈值。

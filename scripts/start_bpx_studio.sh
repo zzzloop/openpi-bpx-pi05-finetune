@@ -12,6 +12,15 @@ if [[ ! -x "${PROJECT_PYTHON}" ]]; then
   exit 2
 fi
 
+# Bind before even the web-runtime import check. The helper consumes this
+# selector, re-execs this launcher, and children inherit its kernel affinity.
+# No global CPU settings, existing jobs or training parameters change.
+if [[ -n "${BPX_CPU_SOCKET:-}" ]]; then
+  cd "${PROJECT_ROOT}"
+  exec "${PROJECT_PYTHON}" -u -m openpi.bpx_studio.cpu_affinity \
+    --socket "${BPX_CPU_SOCKET}" -- bash "${SCRIPT_DIR}/start_bpx_studio.sh" "$@"
+fi
+
 # BPX Studio's small, pure-Python web stack is committed as wheel files so the
 # dashboard can start on an air-gapped server. Python can import directly from
 # wheels (zip files); no installation, resolver, cache, or package index is used.
