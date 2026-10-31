@@ -180,9 +180,7 @@ def build_hdf5_export(project_root: pathlib.Path, values: Mapping[str, object]) 
 def build_normalize(values: Mapping[str, object]) -> CommandSpec:
     root = _openpi_root(str(values["openpi_root"]))
     config = _name(str(values["config_name"]), "训练配置名")
-    workers = int(values.get("workers", 32))
-    if not 0 <= workers <= 256:
-        raise ValueError("归一化 workers 必须在 0 到 256 之间；0 表示主进程读取，不启动子进程")
+    workers = _positive(int(values.get("workers", 32)), "workers", maximum=256)
     env = _data_environment({key: str(value) for key, value in values.items()})
     # Statistics use NumPy, not model inference. Do not initialize the server's
     # CUDA devices just to create the loader's otherwise-unused JAX sharding.

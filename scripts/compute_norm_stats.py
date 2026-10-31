@@ -162,8 +162,7 @@ def main(
     keys = ["state", "actions"]
     stats = {key: normalize.RunningStats() for key in keys}
 
-    read_mode = "主进程读取（workers=0，无 spawn）" if effective_num_workers == 0 else "等待 workers 返回首批数据"
-    _stage(f"开始归一化统计：{num_batches} batches；{read_mode}")
+    _stage(f"开始归一化统计：{num_batches} batches；等待 workers 返回首批数据")
     first_batch = True
     for batch in tqdm.tqdm(data_loader, total=num_batches, desc="Computing stats"):
         if first_batch:
