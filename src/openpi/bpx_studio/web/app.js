@@ -111,7 +111,10 @@ function cleanReviewMatchesDataset(datasetPath) {
 
 function renderNormalizationReviewState(datasetPath) {
   const node = $("normReviewState");
-  if (!pathMatches(datasetPath, value("cleanOutput"))) {
+  if (currentConfigProfile?.feedback_recovery && pathMatches(datasetPath, currentConfigProfile.dataset_path)) {
+    node.textContent = "估计反馈试验 · 需单独确认";
+    node.className = "warn-text";
+  } else if (!pathMatches(datasetPath, value("cleanOutput"))) {
     node.textContent = "非当前清洗输出";
     node.className = "warn-text";
   } else if (cleanReviewMatchesDataset(datasetPath)) {
@@ -226,6 +229,26 @@ async function confirmDataBinding(action) {
   if (!currentConfigProfile.stats_paths_match) {
     toast("归一化写入与训练加载路径不一致，操作已阻止", true);
     return false;
+  }
+  const recovered = currentConfigProfile.feedback_recovery;
+  if (recovered) {
+    if (!recovered.structural_audit_passed) {
+      toast("估计反馈数据缺少完整发布/结构审计记录，不能启动训练或归一化", true);
+      return false;
+    }
+    if (!recovered.validation_manifest || !pathMatches(value("validationManifest"), recovered.validation_manifest)) {
+      toast(`请先在模型训练页的“启用的划分清单”填写：${recovered.validation_manifest || "恢复工具未生成有效清单"}`, true);
+      return false;
+    }
+    return confirm(
+      `这是估计反馈数据，不是真实测量修复。\n\n` +
+      `数据集：${currentConfigProfile.dataset_path}\n` +
+      `估计坐标：${recovered.estimated_coordinates}；超校准范围坐标：${recovered.extrapolated_coordinates}\n` +
+      `右夹爪只做左右对称迁移，未独立验证闭合/接触动态。\n` +
+      `评估报告：${recovered.report_path}\n\n` +
+      `请使用恢复工具生成的验证清单，不要重新按全部24任务划分。\n` +
+      `确认已复核报告，仅作为独立实验${action}？`,
+    );
   }
   if (!pathMatches(currentConfigProfile.dataset_path, value("cleanOutput"))) {
     return confirm(

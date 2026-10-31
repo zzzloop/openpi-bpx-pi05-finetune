@@ -44,6 +44,7 @@ BPX_CONFIG_PURPOSES = {
     "pi05_bpx_full_low_mem": "第一代 BPX 低显存全参数版本: bpx_blocks 数据集, 适配两张 48 GiB GPU。",
     "pi05_bpx_full_low_mem_combined": "第一代 BPX 合并数据版本: 原 59 条示教与新增多任务数据的全参数微调。",
     "pi05_bpx_full_low_mem_multitask_v2": "第一代 BPX 多任务 v2: 裁减固定轨迹并按任务均衡采样的低显存全参数微调。",
+    "pi05_bpx_full_low_mem_v1_base_estimated": "第一代80条基础集的估计反馈试验：非真实反馈修复，使用独立数据/统计/模型，不能作实机安全或VLM保留证明。",
     "pi05_bpx_lora": "第一代 BPX LoRA 对照实验: bpx_blocks 数据集, 仅训练低秩适配参数。",
 }
 
@@ -210,7 +211,7 @@ def _config_profile(
     project_root: pathlib.Path,
     lerobot_root: pathlib.Path,
     train_config,
-) -> dict[str, str | bool | int]:
+) -> dict[str, object]:
     data_factory = train_config.data
     repo_id = getattr(data_factory, "repo_id", None)
     if not isinstance(repo_id, str) or not repo_id or repo_id == "fake":
@@ -235,6 +236,22 @@ def _config_profile(
     )
     computed_stats_path = (computed_stats_dir / "norm_stats.json").resolve()
     loaded_stats_path = (loaded_stats_dir / "norm_stats.json").resolve()
+    recovery_path = dataset_path / "meta/bpx_feedback_recovery.json"
+    feedback_recovery = None
+    if recovery_path.is_file():
+        recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
+        totals = recovery.get("totals", {})
+        feedback_recovery = {
+            "report_path": str(recovery_path),
+            "status": recovery.get("status"),
+            "structural_audit_passed": bool(recovery.get("post_audit"))
+            and recovery.get("status") == "estimated_experiment_only"
+            and pathlib.Path(str(recovery.get("output", ""))).resolve() == dataset_path,
+            "estimated_coordinates": totals.get("estimated_coordinates", 0),
+            "extrapolated_coordinates": totals.get("extrapolated_coordinates", 0),
+            "right_gripper_dynamics_validated": False,
+            "validation_manifest": recovery.get("validation_manifest"),
+        }
     return {
         "config_name": train_config.name,
         "repo_id": repo_id,
@@ -247,6 +264,7 @@ def _config_profile(
         "loaded_stats_exists": loaded_stats_path.is_file(),
         "stats_size_bytes": computed_stats_path.stat().st_size if computed_stats_path.is_file() else 0,
         "purpose": purpose,
+        "feedback_recovery": feedback_recovery,
     }
 
 

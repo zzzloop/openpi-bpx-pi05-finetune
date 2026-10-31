@@ -965,6 +965,42 @@ _CONFIGS = [
         },
     ),
     TrainConfig(
+        name="pi05_bpx_full_low_mem_v1_base_estimated",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30),
+        data=LeRobotBpxDataConfig(
+            repo_id="bpx/bpx_v1_base_estimated_v001",
+            assets=AssetsConfig(asset_id="bpx/bpx_v1_base_estimated_v001"),
+            # Frame-uniform: do not give the 16 singleton composition tasks
+            # two thirds of all samples merely because there are 16 labels.
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        batch_size=2,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("./checkpoints/pretrained/pi05_base/params"),
+        num_train_steps=20_000,
+        save_interval=5_000,
+        keep_period=25_000,
+        monitoring_enabled=True,
+        monitoring_plot_interval=500,
+        monitoring_visualization_interval=1_000,
+        monitoring_max_samples=2,
+        monitoring_action_names=bpx_constants.BPX_EFFECTIVE_JOINT_NAMES,
+        policy_metadata={
+            "fps": bpx_constants.BPX_FPS,
+            "action_horizon": 30,
+            "raw_action_dim": bpx_constants.BPX_RAW_DIM,
+            "effective_action_dim": bpx_constants.BPX_EFFECTIVE_DIM,
+            "state_provenance": "estimated_feedback_experiment_not_measured_truth",
+        },
+    ),
+    TrainConfig(
         name="pi05_bpx_full_low_mem_multitask_v2",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=30),
         data=LeRobotBpxDataConfig(

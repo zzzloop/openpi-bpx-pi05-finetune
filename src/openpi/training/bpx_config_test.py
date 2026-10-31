@@ -17,6 +17,7 @@ from openpi.training import optimizer
         ("pi05_bpx_full", 64, 20_000, 2.5e-5, 0.999),
         ("pi05_bpx_full_low_mem", 2, 20_000, 2.5e-5, None),
         ("pi05_bpx_full_low_mem_combined", 2, 20_000, 2.5e-5, None),
+        ("pi05_bpx_full_low_mem_v1_base_estimated", 2, 20_000, 2.5e-5, None),
         ("pi05_bpx_full_low_mem_multitask_v2", 2, 20_000, 2.5e-5, None),
         ("pi05_bpx_lora", 128, 30_000, 5e-5, None),
     ],
@@ -94,6 +95,20 @@ def test_bpx_combined_config_only_changes_dataset_identity():
     assert combined.data.repo_id == "bpx/bpx_blocks_combined"
     assert combined.data.assets.asset_id == "bpx/bpx_blocks_combined"
     assert combined.data.assets.assets_dir is None
+
+
+def test_estimated_feedback_config_keeps_original_training_objective_and_own_identity():
+    original = config_module.get_config("pi05_bpx_full_low_mem_combined")
+    estimated = config_module.get_config("pi05_bpx_full_low_mem_v1_base_estimated")
+    assert estimated.model == original.model
+    assert estimated.lr_schedule == original.lr_schedule
+    assert estimated.optimizer == original.optimizer
+    assert estimated.weight_loader == original.weight_loader
+    assert estimated.batch_size == 2 and estimated.ema_decay is None
+    assert estimated.data.repo_id == "bpx/bpx_v1_base_estimated_v001"
+    assert estimated.data.base_config.balance_by_task is False
+    assert estimated.save_interval == 5000 and estimated.keep_period == 25000
+    assert "estimated" in estimated.policy_metadata["state_provenance"]
 
 
 def test_bpx_multitask_v2_config_is_independent_and_task_balanced():
