@@ -12,6 +12,40 @@ import websockets.frames
 logger = logging.getLogger(__name__)
 
 
+def _warmup_bpx_policy(policy, metadata: dict) -> None:
+    """Compile BPX inference before listening; never send warmup actions anywhere.
+
+    Other embodiments are deliberately untouched. Warmup uses the normal input
+    transforms and sampler, so it also initializes tokenizer/device work. Like
+    two ordinary inference calls it consumes sampler RNG, not training updates.
+    """
+    if metadata.get("raw_action_dim") != 23 or metadata.get("effective_action_dim") != 18:
+        return
+    import numpy as np
+
+    from openpi.policies import bpx_constants
+
+    logger.info("BPX WARMUP: compiling before listening; no robot connection or motor output")
+    for index in range(2):
+        observation = {
+            "qpos": np.zeros(bpx_constants.BPX_RAW_DIM, dtype=np.float32),
+            "images": {
+                key: np.zeros(bpx_constants.BPX_SOURCE_IMAGE_SHAPE, dtype=np.uint8)
+                for key in bpx_constants.BPX_IMAGE_KEYS
+            },
+            "prompt": bpx_constants.BPX_DEFAULT_PROMPT,
+        }
+        started = time.monotonic()
+        result = policy.infer(observation)
+        # Materialize GPU output: timing must include execution, not just dispatch.
+        actions = np.asarray(result["actions"])
+        expected = (metadata["action_horizon"], bpx_constants.BPX_RAW_DIM)
+        if actions.shape != expected or not np.isfinite(actions).all():
+            raise ValueError(f"BPX warmup returned invalid actions: {actions.shape}; expected {expected}")
+        logger.info("BPX WARMUP %d/2 finished in %.1f ms", index + 1, (time.monotonic() - started) * 1000)
+    logger.info("BPX WARMUP READY: accepting real observations next; synthetic actions discarded")
+
+
 class WebsocketPolicyServer:
     """Serves a policy using the websocket protocol. See websocket_client_policy.py for a client implementation.
 
@@ -35,6 +69,7 @@ class WebsocketPolicyServer:
         asyncio.run(self.run())
 
     async def run(self):
+        _warmup_bpx_policy(self._policy, self._metadata)
         async with _server.serve(
             self._handler,
             self._host,
