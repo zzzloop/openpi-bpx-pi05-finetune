@@ -3,6 +3,7 @@ import http
 import logging
 import time
 import traceback
+import zlib
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
@@ -10,6 +11,21 @@ import websockets.asyncio.server as _server
 import websockets.frames
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_request(payload, limit=64 * 1024 * 1024):
+    """Decode the negotiated lossless envelope, with a bounded expansion size."""
+    if not isinstance(payload, bytes):
+        raise ValueError("Inference request must be a binary WebSocket frame")
+    if len(payload) > limit:
+        raise ValueError("Inference request exceeds 64 MiB")
+    if not payload.startswith(b"BPXZ1"):
+        return payload
+    decoder = zlib.decompressobj()
+    decoded = decoder.decompress(payload[5:], limit + 1)
+    if (len(decoded) > limit or decoder.unconsumed_tail or decoder.unused_data or not decoder.eof):
+        raise ValueError("Invalid or oversized compressed inference request")
+    return decoded
 
 
 def _warmup_bpx_policy(policy, metadata: dict) -> None:
@@ -62,7 +78,8 @@ class WebsocketPolicyServer:
         self._policy = policy
         self._host = host
         self._port = port
-        self._metadata = metadata or {}
+        self._metadata = dict(metadata or {})
+        self._metadata["request_compression"] = "zlib-v1"
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
     def serve_forever(self) -> None:
@@ -87,6 +104,7 @@ class WebsocketPolicyServer:
         await websocket.send(packer.pack(self._metadata))
 
         prev_total_time = None
+        request_number = 0
         while True:
             try:
                 start_time = time.monotonic()
@@ -95,7 +113,8 @@ class WebsocketPolicyServer:
                 request_received_unix_ns = time.time_ns()
 
                 unpack_time = time.monotonic()
-                obs = msgpack_numpy.unpackb(raw_obs)
+                decoded_obs = _decode_request(raw_obs)
+                obs = msgpack_numpy.unpackb(decoded_obs)
                 unpack_time = time.monotonic() - unpack_time
 
                 infer_time = time.monotonic()
@@ -106,6 +125,8 @@ class WebsocketPolicyServer:
                 action["server_timing"] = {
                     "infer_ms": infer_time * 1000,
                     "request_unpack_ms": unpack_time * 1000,
+                    "request_wire_bytes": len(raw_obs),
+                    "request_uncompressed_bytes": len(decoded_obs),
                     # Time from receiving the complete WebSocket frame through
                     # observation decoding and policy inference. Response
                     # MessagePack serialization and socket delivery happen
@@ -118,6 +139,14 @@ class WebsocketPolicyServer:
                 if prev_total_time is not None:
                     # We can only record the last total time since we also want to include the send time.
                     action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+
+                request_number += 1
+                if request_number <= 3 or request_number % 30 == 0 or infer_time > 0.5:
+                    logger.info(
+                        "Inference request=%d peer=%s wire=%dB raw=%dB decode=%.1fms infer=%.1fms",
+                        request_number, websocket.remote_address, len(raw_obs), len(decoded_obs),
+                        unpack_time * 1000, infer_time * 1000,
+                    )
 
                 await websocket.send(packer.pack(action))
                 prev_total_time = time.monotonic() - start_time
