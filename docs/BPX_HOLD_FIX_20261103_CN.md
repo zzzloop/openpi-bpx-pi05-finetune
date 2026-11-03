@@ -36,12 +36,14 @@
 服务器：只更新本仓库服务文件，重启原推理命令；等待 `BPX WARMUP READY` 和监听日志。
 模型、Checkpoint、端口不变。重启不会触发机器人策略使能。
 
-工控机手动替换两个源文件（不是用服务器Git拉取替代）：
+工控机手动替换三个源文件（不是用服务器Git拉取替代）：
 
 - 工作区 `ros_v2_openpi_delivery/openpi_bpx_ros1/scripts/bpx_policy_bridge.py`
   → `/home/nvidia/ROS/openpi_bpx_ros1/scripts/bpx_policy_bridge.py`
 - 工作区 `ros_v2_openpi_delivery/openpi-bpx-control-center/web/app.js`
   → `/home/nvidia/ROS/openpi-bpx-control-center/web/app.js`
+- 工作区 `ros_v2_openpi_delivery/openpi-bpx-control-center/web/index.html`
+  → `/home/nvidia/ROS/openpi-bpx-control-center/web/index.html`
 
 先停用策略并确认机器人由操作员妥善支撑，再只重启策略桥，启动仍为禁用；
 浏览器强制刷新即可更新JS，不必全部重启硬件。不得覆盖本机config、token或更改发布模式。
@@ -53,3 +55,16 @@
 约半秒，单请求流水线仍可能供不上有效尾部。该修复去掉额外调度等待，不能掩盖实际
 缺数据、断网或持续推理过慢。必要时另行优化传输/推理或评估新控制方案，不能靠回放
 过期动作、降低实际执行速度却保留原时间标签、忽略反馈失效来伪造连续性。
+
+## 同日追加：中断后不能再次回位
+
+源码不存在只能使用一次的标志。已确认HOLD保留enabled=true，而旧can_start_pose
+要求enabled=false；用户所说的“中断”可能仍是HOLD，并不等于撤销策略授权。
+现在允许点击回位；人工确认后在桥锁内先disable，清空动作与待处理请求事件、
+增加generation使旧结果失效，再从当前实测反馈重建回位状态/误差/限速/超时。
+不会同时执行策略与回位，完成回位不会自动启策略。
+门禁在停用前校验，拒绝请求不会擅自启动回位；已在回位时重复请求不延长超时。
+确认框每次重置取消值。纯标准库状态机测试新增4项通过，总计16项（无ROS/ML）。
+
+如果已经明确停用后仍出现“状态显示到位而实际没动”，本次不能证明是同一原因：
+必须排查在线反馈是否冻结，不能用上次命令替代真实反馈掩盖故障。
