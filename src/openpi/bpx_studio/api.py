@@ -50,7 +50,10 @@ BPX_CONFIG_PURPOSES = {
     "pi05_bpx_cf_naive_full": "第二阶段 · 组1：原始 CFM，全参数微调。",
     "pi05_bpx_cf_policy_cfg": "第二阶段 · 组2：全参数 CFM，训练语言 dropout 15%，推理前段启用 CFG。",
     "pi05_bpx_cf_partial_ft": "第二阶段 · 组3：冻结视觉语言主干，全训动作专家和动作投影。",
-    "pi05_bpx_cf_ours": "第二阶段 · 组4：同一四元组共享噪声与时间，CFM + NC-DFM + 注意力监督。",
+    bpx_counterfactual.QUAD_DIFF_CONFIG: (
+        f"第二阶段 · 组4：{bpx_counterfactual.QUAD_DIFF_NAME}（反事实四元组差分流匹配），"
+        "对齐四元组共享噪声与时间，CFM + NC-DFM + 注意力监督。"
+    ),
 }
 
 
@@ -203,6 +206,8 @@ def _next_experiment(checkpoint_root: pathlib.Path, config_name: str) -> str:
     if pathlib.Path(config_name).name != config_name or not config_name:
         raise ValueError("config_name 不是安全的单级名称")
     stage2 = bpx_counterfactual.CONFIGS.get(config_name)
+    if config_name == bpx_counterfactual.QUAD_DIFF_CONFIG:
+        stage2 = "quad_diff_fm"
     prefix = f"bpx_{stage2}_bs4_v" if stage2 else f"{DEFAULT_DATASET_NAME}_bs2_v"
     existing = {path.name for path in (checkpoint_root / config_name).glob(f"{prefix}*")}
     for version in range(1, 10000):

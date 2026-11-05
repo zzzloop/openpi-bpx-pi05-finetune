@@ -71,6 +71,7 @@ class TrainingMonitor:
         plot_interval: int,
         visualization_interval: int,
         action_names: Sequence[str] = (),
+        composite_loss_title: str | None = None,
     ) -> None:
         if plot_interval <= 0 or visualization_interval <= 0:
             raise ValueError("Monitoring intervals must be positive.")
@@ -84,6 +85,7 @@ class TrainingMonitor:
         self.plot_interval = plot_interval
         self.visualization_interval = visualization_interval
         self.action_names = tuple(action_names)
+        self.composite_loss_title = composite_loss_title
         self.jsonl_path = self.output_dir / "metrics.jsonl"
         self.csv_path = self.output_dir / "metrics.csv"
         self._history = self._load_history()
@@ -217,10 +219,16 @@ class TrainingMonitor:
         axes[0, 0].plot(steps, trend, linewidth=2, label="Hampel + EMA (display only)")
         if outliers.any():
             axes[0, 0].scatter(steps[outliers], loss[outliers], s=10, color="red", label="raw peaks retained")
-        loss_min, loss_max = self._series("loss_min"), self._series("loss_max")
-        if np.isfinite(loss_min).any() and np.isfinite(loss_max).any():
-            axes[0, 0].fill_between(steps, loss_min, loss_max, alpha=0.15, label="mean interval min/max")
-        axes[0, 0].set_title("Flow-matching loss")
+        if self.composite_loss_title:
+            # Per-action min/max describe CFM, not the composite batch objective.
+            cfm = self._series("cfm_loss")
+            if np.isfinite(cfm).any():
+                axes[0, 0].plot(steps, cfm, "--", linewidth=1.2, label="CFM component")
+        else:
+            loss_min, loss_max = self._series("loss_min"), self._series("loss_max")
+            if np.isfinite(loss_min).any() and np.isfinite(loss_max).any():
+                axes[0, 0].fill_between(steps, loss_min, loss_max, alpha=0.15, label="mean interval min/max")
+        axes[0, 0].set_title(self.composite_loss_title or "Flow-matching loss")
         axes[0, 0].legend()
 
         for key, label in (("grad_norm", "gradient"), ("update_norm", "optimizer update")):
@@ -244,7 +252,8 @@ class TrainingMonitor:
         if latest_horizon is not None:
             latest_horizon = np.asarray(latest_horizon, dtype=np.float64)
             axes[1, 2].plot(np.arange(latest_horizon.size), latest_horizon, marker="o", markersize=3)
-        axes[1, 2].set_title("Latest loss by action-horizon index")
+        axes[1, 2].set_title("Latest CFM loss by action-horizon index" if self.composite_loss_title
+                             else "Latest loss by action-horizon index")
         for axis in axes.flat:
             axis.grid(alpha=0.25)
             axis.set_xlabel("step" if axis is not axes[1, 2] else "horizon index")
@@ -259,9 +268,13 @@ class TrainingMonitor:
         paths = [snapshot, latest]
         figure, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
         axes[0].plot(steps, loss, linewidth=1, alpha=0.65)
-        axes[0].set_title("Raw training loss: all recorded peaks retained")
+        axes[0].set_title(f"Raw {self.composite_loss_title or 'training loss'}: all recorded peaks retained")
         axes[1].plot(steps, trend, color="darkorange", linewidth=2)
-        axes[1].set_title(f"Display-only robust trend ({int(outliers.sum())} outliers; independent y scale)")
+        trend_title = (
+            f"{self.composite_loss_title} — display-only trend"
+            if self.composite_loss_title else "Display-only robust trend"
+        )
+        axes[1].set_title(f"{trend_title} ({int(outliers.sum())} outliers; independent y scale)")
         for axis in axes:
             axis.grid(alpha=0.25)
             axis.set_xlabel("step")

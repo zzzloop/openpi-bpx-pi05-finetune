@@ -272,3 +272,34 @@ def test_monitor_compares_raw_eval_losses_and_preserves_all_peaks(tmp_path):
     assert records[-1]["val_loss"] == .2
     assert (tmp_path / "generalization_latest.png").is_file()
     assert all(p.is_file() for p in paths)
+
+
+@pytest.mark.parametrize("composite_title", [None, "QuadDiff-FM total loss"])
+def test_monitor_labels_composite_objective_without_mislabelling_cfm(tmp_path, monkeypatch, composite_title):
+    from openpi.training.monitoring import TrainingMonitor
+
+    monitor = TrainingMonitor(tmp_path, batch_size=4, plot_interval=500, visualization_interval=1000,
+                              composite_loss_title=composite_title)
+    original_save = monitor._save_figure
+    figures = {}
+
+    def inspect(figure, path):
+        figures[path.name] = [
+            (axis.get_title(), [line.get_label() for line in axis.lines], len(axis.collections))
+            for axis in figure.axes
+        ]
+        original_save(figure, path)
+
+    monkeypatch.setattr(monitor, "_save_figure", inspect)
+    monitor.log_metrics(0, {
+        "loss": 1.0, "cfm_loss": 0.5, "loss_min": 0.2, "loss_max": 0.7,
+        "loss_by_horizon": [0.4, 0.6], "grad_norm": 1.0,
+        "train_eval_loss": 0.5, "val_loss": 0.6, "generalization_gap": 0.1,
+    })
+    total, *_, horizon = figures["training_overview_step_000000.png"]
+    assert total[0] == (composite_title or "Flow-matching loss")
+    assert ("CFM component" in total[1]) == bool(composite_title)
+    assert bool(total[2]) != bool(composite_title)  # Old min/max band must not be called a composite-loss band.
+    assert ("CFM loss" in horizon[0]) == bool(composite_title)
+    assert (composite_title or "training loss") in figures["loss_trend_latest.png"][0][0]
+    assert figures["generalization_latest.png"][0][0] == "Comparable losses: same mode, fixed samples/noise"

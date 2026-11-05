@@ -723,11 +723,13 @@ async function show(job) {
   $("progressPercent").textContent = `${Number(progress.percent || 0).toFixed(1)}%`;
   $("progressBar").value = progress.percent || 0;
   $("metricLoss").textContent = fmt(job.metrics?.loss);
-  const ccfa = Number.isFinite(job.metrics?.nc_dfm_loss);
+  const quadDiff = Number.isFinite(job.metrics?.nc_dfm_loss);
   const cfg = Number.isFinite(job.metrics?.language_drop_rate);
-  $("stage2Metrics").hidden = !ccfa && !cfg;
-  $("stage2Metrics").textContent = ccfa
-    ? `CCFA：CFM ${fmt(job.metrics.cfm_loss)} · NC-DFM ${fmt(job.metrics.nc_dfm_loss)} · Attention semantic ${fmt(job.metrics.attn_sem_loss)} · Attention swap ${fmt(job.metrics.attn_swap_loss)}。上方训练 Loss 是加权总损失；下方独立验证对比仍用同一 CFM 口径。`
+  $("metricLossLabel").textContent = quadDiff ? "QuadDiff-FM 总损失" : "LOSS";
+  $("lossViewLabel").textContent = quadDiff ? "QuadDiff-FM 总损失曲线" : "训练曲线";
+  $("stage2Metrics").hidden = !quadDiff && !cfg;
+  $("stage2Metrics").textContent = quadDiff
+    ? `QuadDiff-FM：CFM ${fmt(job.metrics.cfm_loss)} · NC-DFM ${fmt(job.metrics.nc_dfm_loss)} · Attention semantic ${fmt(job.metrics.attn_sem_loss)} · Attention swap ${fmt(job.metrics.attn_swap_loss)}。上方训练 Loss 是加权总损失；下方独立验证对比仍用同一 CFM 口径。`
     : cfg ? `CFG：最近记录区间实际语言 dropout ${(100 * job.metrics.language_drop_rate).toFixed(1)}%；训练目标概率 15%，验证 Loss 使用完整任务文本。` : "";
   $("metricGrad").textContent = fmt(job.metrics?.grad_norm);
   $("metricLr").textContent = fmt(job.metrics?.learning_rate);

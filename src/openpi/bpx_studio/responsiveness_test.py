@@ -32,7 +32,7 @@ def test_reads_actual_config_bindings_without_imports(name, repo, assets):
 
 
 def test_stage2_configs_share_norm_paths_but_not_experiment_names(tmp_path):
-    from openpi.training.bpx_counterfactual import CONFIGS
+    from openpi.training.bpx_counterfactual import CONFIGS, QUAD_DIFF_CONFIG, QUAD_DIFF_NAME
 
     paths = set()
     for name in CONFIGS:
@@ -41,7 +41,10 @@ def test_stage2_configs_share_norm_paths_but_not_experiment_names(tmp_path):
         )
         assert profile["stats_paths_match"] and profile["repo_id"] == "bpx/bpx_v1_counterfactual_v001"
         paths.add(profile["loaded_stats_path"])
-        assert api._next_experiment(tmp_path, name).startswith(f"bpx_{CONFIGS[name]}_bs4_")
+        method_slug = "quad_diff_fm" if name == QUAD_DIFF_CONFIG else CONFIGS[name]
+        assert api._next_experiment(tmp_path, name).startswith(f"bpx_{method_slug}_bs4_")
+        if name == QUAD_DIFF_CONFIG:
+            assert QUAD_DIFF_NAME in profile["purpose"]
     assert len(paths) == 1
 
 

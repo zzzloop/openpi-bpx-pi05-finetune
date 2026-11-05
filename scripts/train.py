@@ -431,6 +431,8 @@ def main(config: _config.TrainConfig):
             plot_interval=config.monitoring_plot_interval,
             visualization_interval=config.monitoring_visualization_interval,
             action_names=config.monitoring_action_names,
+            composite_loss_title=(f"{_bpx_cf.QUAD_DIFF_NAME} total loss"
+                                  if config.name == _bpx_cf.QUAD_DIFF_CONFIG else None),
         )
         logging.info(f"Durable training monitoring enabled at {monitor.output_dir}")
     else:

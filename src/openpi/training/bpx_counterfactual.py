@@ -10,11 +10,15 @@ import random
 
 from openpi.training import validation_split
 
+QUAD_DIFF_CONFIG = "pi05_bpx_cf_ours"
+QUAD_DIFF_NAME = "QuadDiff-FM"
+
 CONFIGS = {
     "pi05_bpx_cf_naive_full": "naive_full",
     "pi05_bpx_cf_policy_cfg": "policy_cfg",
     "pi05_bpx_cf_partial_ft": "partial_ft",
-    "pi05_bpx_cf_ours": "ccfa_ours",
+    # Keep the serialized method ID for existing run protocols and resume.
+    QUAD_DIFF_CONFIG: "ccfa_ours",
 }
 BASE_CONFIG = next(iter(CONFIGS))
 HORIZON = 30
@@ -160,7 +164,7 @@ def bound_quads(manifest: Path, dataset_root: Path, split_path: Path, *, require
         raise ValueError("A training quadruple crosses the holdout boundary")
     if require_attention and not all(any(any(q.attention[start:start+2]) for q in selected)
                                      for start in (0, 2)):
-        raise ValueError("CCFA requires reviewed semantic and swap attention edges in the training split")
+        raise ValueError(f"{QUAD_DIFF_NAME} requires reviewed semantic and swap attention edges in the training split")
     return selected, records
 
 
