@@ -418,6 +418,7 @@ def build_policy_serve(values: Mapping[str, object]) -> CommandSpec:
             "uv",
             "run",
             "scripts/serve_policy.py",
+            "--port=23789",
             "policy:checkpoint",
             f"--policy.config={config}",
             f"--policy.dir={checkpoint}",

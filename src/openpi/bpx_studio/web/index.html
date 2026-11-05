@@ -99,7 +99,7 @@
         <label class="wide readonly-field">训练实际读取的数据集 <span class="lock">CONFIG 锁定</span><input id="trainDatasetSource" readonly /><small>必须与本次归一化所读取的数据集一致。</small></label><label class="wide readonly-field">训练加载的归一化统计 <span class="lock">CONFIG 锁定</span><input id="trainStatsSource" readonly /><small>只是小型统计 JSON，不包含图像或 episode 数据。</small></label>
       </div><div id="trainPurpose" class="config-note">—</div><div class="buttons"><button id="preflightTrain" type="button" hidden>四卡预检（不保存模型）</button><button id="startTrain" class="primary">启动训练</button></div></section>
 
-      <section class="card panel" data-panel="serve"><div class="section-title"><h2><em>06</em>Checkpoint 推理服务</h2><span>自动扫描完整 checkpoint，默认监听 8000</span></div><div class="grid three">
+      <section class="card panel" data-panel="serve"><div class="section-title"><h2><em>06</em>Checkpoint 推理服务</h2><span>自动扫描完整 checkpoint，监听 23789（与工控机一致）</span></div><div class="grid three">
         <label class="wide">Config name（由 checkpoint 自动匹配）<input id="serveConfig" readonly /></label><label class="wide">全部完整 checkpoint<select id="serveCheckpoint"><option value="">正在扫描…</option></select></label><label>CUDA 设备<input id="serveCudaDevices" value="2,3" /></label><label>XLA 显存比例<input id="serveMemoryFraction" value="0.96" /></label>
       </div><div class="buttons"><button id="refreshCheckpoints">刷新 Checkpoint</button><button id="startServe" class="primary">启动模型推理</button><button id="stopServe" class="danger">停止模型推理</button></div></section>
 

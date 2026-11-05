@@ -113,5 +113,8 @@ def test_all_job_routes_build_matching_commands(tmp_path, monkeypatch):
             response = client.post("/api/jobs/" + route, json=payload)
             assert response.status_code == 200, response.text
             assert expected in response.json()["argv"]
+            if route == "serve":
+                assert response.json()["argv"].count("--port=23789") == 1
+                assert response.json()["env"]["CUDA_VISIBLE_DEVICES"] == "2,3"
             if route in {"normalize", "train"}:
                 assert response.json()["env"]["HF_LEROBOT_HOME"] == str(raw)

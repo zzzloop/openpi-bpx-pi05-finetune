@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import pathlib
@@ -228,7 +229,21 @@ def test_policy_serve_uses_selected_complete_checkpoint(tmp_path: pathlib.Path) 
     )
     assert "--policy.config=config" in spec.argv
     assert f"--policy.dir={checkpoint.resolve()}" in spec.argv
+    assert spec.argv.count("--port=23789") == 1
+    assert "--port=8000" not in spec.argv
     assert spec.env["CUDA_VISIBLE_DEVICES"] == "2,3"
+
+
+def test_policy_port_matches_robot_bridge_without_importing_model() -> None:
+    root = pathlib.Path(__file__).resolve().parents[3]
+    tree = ast.parse((root / "scripts/serve_policy.py").read_text(encoding="utf-8"))
+    args = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Args")
+    port = next(node for node in args.body if isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name) and node.target.id == "port")
+    assert ast.literal_eval(port.value) == 23789
+    html = (pathlib.Path(__file__).parent / "web/index.html").read_text(encoding="utf-8")
+    assert "监听 23789（与工控机一致）" in html
+    assert "默认监听 8000" not in html
 
 
 def test_isolated_spike_uses_neighbor_mean_without_touching_other_frames() -> None:

@@ -46,8 +46,8 @@ class Args:
     # prompt.
     default_prompt: str | None = None
 
-    # Port to serve the policy on.
-    port: int = 8000
+    # Match the deployed BPX robot bridge; the dashboard also passes this explicitly.
+    port: int = 23789
     # Record the policy's behavior for debugging.
     record: bool = False
 
