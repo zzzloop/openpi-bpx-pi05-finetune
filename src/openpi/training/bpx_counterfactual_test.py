@@ -47,10 +47,14 @@ def test_split_binding_sampling_and_resume(dataset, tmp_path):
     sampler = cf.QuadBatchSampler(quads, rows, train, seed=42)
     it = iter(sampler)
     batches = [next(it) for _ in range(11)]
-    sampler.start_step = 10
-    assert next(iter(sampler)) == batches[-1]
-    for batch in batches:
+    for offset in (3, 10):
+        sampler.start_step = offset
+        assert next(iter(sampler)) == batches[offset]
+    for step, batch in enumerate(batches):
         assert len(batch) == 4
+        if not cf.is_aligned_step(step):
+            assert all(0 <= index < sampler.frame_count and mask is None for index, mask in batch)
+            continue
         assert any(
             all(sampler.offsets[i] + lo <= index <= sampler.offsets[i] + hi and mask == q.attention
                 for (index, mask), i, (lo, hi) in zip(batch, q.episodes, q.windows, strict=True))
@@ -65,6 +69,21 @@ def test_split_binding_sampling_and_resume(dataset, tmp_path):
     manifest.write_text(manifest.read_text() + "\n")
     with pytest.raises(ValueError, match="exact quadruple"):
         cf.bound_quads(manifest, root, output)
+
+
+def test_whole_trajectory_covers_every_training_frame_including_prelude_and_tail(dataset, tmp_path):
+    root, manifest, _ = dataset
+    output = tmp_path / "validation.json"
+    train = cf.build_split(root, manifest, output)["train_episodes"]
+    quads, rows = cf.bound_quads(manifest, root, output)
+    sampler = cf.QuadBatchSampler(quads, rows, train, seed=42)
+    batches = iter(sampler)
+    frames = []
+    for step in range(2 * ((sampler.frame_count + 3) // 4)):
+        batch = next(batches)
+        if not cf.is_aligned_step(step):
+            frames.extend(index for index, _ in batch)
+    assert sorted(frames[:sampler.frame_count]) == list(range(sampler.frame_count))
 
 
 @pytest.mark.parametrize(("key", "value", "error"), [
@@ -98,6 +117,12 @@ def test_train_and_norm_commands_are_opt_in(dataset, tmp_path):
         spec = commands.build_train(dict(values, config_name=config_name))
         assert spec.env["CUDA_VISIBLE_DEVICES"] == "0,1,2,3"
         assert f"--counterfactual-manifest={quad}" in spec.argv and "--batch-size=4" in spec.argv
+        preflight = commands.build_train(dict(values, config_name=config_name, stage2_smoke_test=True))
+        assert "--stage2-smoke-test" in preflight.argv and "--overwrite" not in preflight.argv
+        assert preflight.total_units == 2 and preflight.env["WANDB_MODE"] == "disabled"
+        assert "WANDB_DIR" not in preflight.env
+        with pytest.raises(ValueError, match="四卡预检"):
+            commands.build_train(dict(values, config_name=config_name, stage2_smoke_test=True, mode="resume"))
         norm = commands.build_normalize(dict(values, config_name=config_name))
         assert "--validation-manifest" in norm.argv
         with pytest.raises(ValueError, match="第二阶段"):

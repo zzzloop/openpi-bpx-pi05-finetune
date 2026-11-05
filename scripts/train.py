@@ -55,6 +55,8 @@ def init_logging():
 
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        logger.addHandler(logging.StreamHandler())
     logger.handlers[0].setFormatter(formatter)
 
 
@@ -151,6 +153,8 @@ def train_step(
     rng: at.KeyArrayLike,
     state: training_utils.TrainState,
     batch: tuple[_model.Observation, _model.Actions] | tuple[_model.Observation, _model.Actions, dict[str, at.Array]],
+    *,
+    stage2_aligned: bool = False,
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
     model.train()
@@ -166,7 +170,9 @@ def train_step(
         else:
             from openpi.training.bpx_stage2_loss import objective
 
-            chunked_loss, total, extra_metrics = objective(model, rng, observation, actions, batch[2], stage2)
+            chunked_loss, total, extra_metrics = objective(
+                model, rng, observation, actions, batch[2], stage2, aligned=stage2_aligned,
+            )
         horizon_reduce_axes = tuple(range(chunked_loss.ndim - 1))
         return total, {
             "loss_std": jnp.std(chunked_loss),
@@ -219,6 +225,14 @@ def train_step(
         "param_norm": optax.global_norm(kernel_params),
         "learning_rate": config.lr_schedule.create()(state.step),
     }
+    if config.stage2_smoke_test and stage2 == "partial_ft":
+        # Verify the real update does not change ANY frozen leaf. This reduction
+        # runs on device before donation, without copying the checkpoint to host.
+        before = state.params.filter(nnx.All(nnx.Param, config.freeze_filter))
+        after = new_params.filter(nnx.All(nnx.Param, config.freeze_filter))
+        info["frozen_unchanged"] = jnp.all(jnp.stack(jax.tree.leaves(
+            jax.tree.map(jnp.array_equal, before, after)
+        )))
     return new_state, info
 
 
@@ -239,13 +253,16 @@ def _stage2_protocol(config, initial_source):
         raise ValueError("Stage-2 requires both the quadruple manifest and its grouped validation split")
     if not config.resume and initial_source is None:
         raise ValueError("New Stage-2 runs must initialize from the common Stage-1 18000 checkpoint")
-    if not config.resume and config.checkpoint_dir.exists():
+    if not config.resume and not config.stage2_smoke_test and config.checkpoint_dir.exists():
         raise FileExistsError("Stage-2 never overwrites an existing experiment; choose another name or resume")
     if (config.batch_size != 4 or config.fsdp_devices != 4 or jax.process_count() != 1
             or jax.device_count() != 4 or any(device.platform != "gpu" for device in jax.devices())):
         raise ValueError("BPX Stage-2 requires one host, four GPU devices, global batch size 4, and FSDP=4")
     if not getattr(config.model, "pi05", False) or (config.model.action_horizon, config.model.action_dim) != (30, 32):
         raise ValueError("BPX Stage-2 requires the Stage-1 Pi05 architecture (horizon 30, padded action dim 32)")
+    if (config.log_interval < 1 or config.validation_interval < 1 or config.validation_batches < 1
+            or config.validation_interval % config.log_interval):
+        raise ValueError("Stage-2 validation interval must be a positive multiple of log_interval")
     quad_path = pathlib.Path(config.counterfactual_manifest)
     split_path = pathlib.Path(config.validation_manifest)
     dataset = pathlib.Path(HF_LEROBOT_HOME) / config.data.repo_id
@@ -254,7 +271,8 @@ def _stage2_protocol(config, initial_source):
     if not stats.is_file():
         raise ValueError(f"Compute shared Stage-2 TRAIN-ONLY normalization first: {stats}")
     protocol = {
-        "schema_version": 1, "method": mode, "repo_id": config.data.repo_id, "seed": config.seed,
+        "schema_version": 2, "method": mode, "repo_id": config.data.repo_id, "seed": config.seed,
+        "sampling_protocol": _bpx_cf.SAMPLING_PROTOCOL,
         "quad_sha256": hashlib.sha256(quad_path.read_bytes()).hexdigest(),
         "split_digest": _validation_split.split_digest(split_path),
         "norm_sha256": hashlib.sha256(stats.read_bytes()).hexdigest(),
@@ -265,10 +283,68 @@ def _stage2_protocol(config, initial_source):
     path = config.checkpoint_dir / "monitoring/stage2_protocol.json"
     if config.resume:
         previous = json.loads(path.read_text(encoding="utf-8"))
+        if previous.get("sampling_protocol") != _bpx_cf.SAMPLING_PROTOCOL:
+            raise ValueError("Stage-2 sampler changed; start a new experiment from Stage-1 step 18000")
         protocol["initial_checkpoint"] = previous["initial_checkpoint"]
         if previous != protocol:
             raise ValueError("Stage-2 resume settings differ from the saved experiment protocol")
     return path, protocol
+
+
+def _compile_train_step(config, state_sharding, data_sharding, replicated_sharding):
+    stage2_options = {"static_argnames": ("stage2_aligned",)} if config.name in _bpx_cf.CONFIGS else {}
+    return jax.jit(
+        functools.partial(train_step, config),
+        in_shardings=(replicated_sharding, state_sharding, data_sharding),
+        out_shardings=(state_sharding, replicated_sharding),
+        donate_argnums=(1,),
+        **stage2_options,
+    )
+
+
+def _run_stage2_smoke(config, init_rng, train_rng, mesh, data_sharding, replicated_sharding):
+    print("[BPX PREFLIGHT] Loading real dataset and initialization weights; no checkpoints or W&B writes.", flush=True)
+    loader = _data_loader.create_data_loader(config, sharding=data_sharding, shuffle=True, num_batches=2)
+    state, state_sharding = init_train_state(config, init_rng, mesh, resume=False)
+    jax.block_until_ready(state)
+    if _bpx_cf.CONFIGS[config.name] == "partial_ft":
+        frozen = state.params.filter(nnx.All(nnx.Param, config.freeze_filter)).flat_state()
+        trainable = state.params.filter(config.trainable_filter).flat_state()
+        frozen_paths, trainable_paths = tuple(frozen), tuple(trainable)
+        for prefix in (("PaliGemma", "img"), ("PaliGemma", "llm")):
+            if not any(path[:2] == prefix for path in frozen_paths):
+                raise ValueError(f"Expected frozen VLM parameter subtree missing: {prefix}")
+        if not any(path[:2] == ("PaliGemma", "llm") for path in trainable_paths):
+            raise ValueError("Action Expert parameters are not trainable")
+        print(f"[BPX PREFLIGHT] Frozen parameter leaves={len(frozen_paths)}; trainable={len(trainable_paths)}", flush=True)
+    step_fn = _compile_train_step(config, state_sharding, data_sharding, replicated_sharding)
+    for step, batch in enumerate(loader):
+        aligned = _bpx_cf.is_aligned_step(step)
+        print(f"[BPX PREFLIGHT] Compiling and executing {'aligned quad' if aligned else 'whole trajectory'} update", flush=True)
+        with sharding.set_mesh(mesh):
+            state, info = step_fn(train_rng, state, batch, stage2_aligned=aligned)
+        info = jax.device_get(info)
+        if (not all(np.isfinite(x).all() for x in info.values()) or info["grad_norm"] <= 0
+                or info["update_norm"] <= 0 or not info.get("frozen_unchanged", True)):
+            raise FloatingPointError(f"Stage-2 preflight step {step} failed: nonfinite/zero update or changed frozen parameters")
+        print(f"Step {step + 1}: loss={info['loss']:.6g}, grad_norm={info['grad_norm']:.6g}, "
+              f"update_norm={info['update_norm']:.6g}", flush=True)
+    if int(state.step) != 2:
+        raise RuntimeError("Stage-2 preflight did not execute both update paths")
+    if config.selection_suite:
+        # Validate the optional suite binding and bundle before starting a long run.
+        _selection_probes.ProbeRuntime(
+            config, loader.data_config(), state.model_def, state_sharding.params, data_sharding, mesh)
+    print("[BPX PREFLIGHT] Checking one real held-out batch", flush=True)
+    validation = next(iter(_data_loader.create_data_loader(config, sharding=data_sharding, split="validation")))
+    check_eval = jax.jit(functools.partial(eval_step, state.model_def),
+                        in_shardings=(state_sharding.params, replicated_sharding, data_sharding),
+                        out_shardings=replicated_sharding)
+    with sharding.set_mesh(mesh):
+        val_loss = float(check_eval(state.params, jax.random.key(config.validation_seed), validation))
+    if not np.isfinite(val_loss):
+        raise FloatingPointError("Stage-2 preflight held-out CFM is nonfinite")
+    print(f"BPX STAGE-2 PREFLIGHT PASS: two updates, heldout_cfm={val_loss:.6g}; no checkpoint saved", flush=True)
 
 
 def main(config: _config.TrainConfig):
@@ -305,6 +381,10 @@ def main(config: _config.TrainConfig):
     mesh = sharding.make_mesh(config.fsdp_devices)
     data_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+
+    if config.stage2_smoke_test:
+        _run_stage2_smoke(config, init_rng, train_rng, mesh, data_sharding, replicated_sharding)
+        return
 
     checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
         config.checkpoint_dir,
@@ -372,12 +452,7 @@ def main(config: _config.TrainConfig):
             data_iter = iter(data_loader)
             batch = next(data_iter)
 
-    ptrain_step = jax.jit(
-        functools.partial(train_step, config),
-        in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
-        out_shardings=(train_state_sharding, replicated_sharding),
-        donate_argnums=(1,),
-    )
+    ptrain_step = _compile_train_step(config, train_state_sharding, data_sharding, replicated_sharding)
 
     start_step = int(train_state.step)
     if monitor is not None:
@@ -504,7 +579,8 @@ def main(config: _config.TrainConfig):
                               "denoise_steps": config.selection_denoise_steps, "seed": config.seed,
                               "action_names": list(config.monitoring_action_names),
                               "inference_params": "ema" if train_state.ema_params is not None else "current",
-                              "initial_checkpoint": config.init_checkpoint,
+                              "initial_checkpoint": (stage2_protocol[1]["initial_checkpoint"] if stage2_protocol
+                                                     else config.init_checkpoint),
                               "selection_policy": probe_runtime.manifest.get("selection_policy", {}),
                               "loss_function": (f"Stage-2 {stage2}; diagnostics never enter gradients" if stage2
                                                 else "UNCHANGED compute_loss; diagnostics never enter gradients")}
@@ -565,7 +641,11 @@ def main(config: _config.TrainConfig):
         for step in pbar:
             last_trained_batch = batch
             with sharding.set_mesh(mesh):
-                train_state, info = ptrain_step(train_rng, train_state, batch)
+                if stage2:
+                    train_state, info = ptrain_step(
+                        train_rng, train_state, batch, stage2_aligned=_bpx_cf.is_aligned_step(step))
+                else:
+                    train_state, info = ptrain_step(train_rng, train_state, batch)
             last_completed_step = step
             infos.append(info)
             if step % config.log_interval == 0:

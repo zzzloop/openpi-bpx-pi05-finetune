@@ -29,6 +29,7 @@ function renderTrainingRecipe() {
   $("trainingRecipe").value = stage2 ? value("trainConfig") : "";
   $("quadManifestField").style.display = stage2 ? "flex" : "none";
   $("quadManifestField").hidden = !stage2;
+  $("preflightTrain").hidden = !stage2;
   $("validationSourceField").style.display = stage2 ? "none" : "";
   $("validationGroupingField").style.display = stage2 ? "none" : "";
   $("createValidationSplit").textContent = stage2 ? "按四元组生成验证清单" : "生成分组验证清单";
@@ -259,7 +260,7 @@ async function confirmDataBinding(action) {
       toast("先导入第二阶段数据，再按四元组生成并启用验证清单", true);
       return false;
     }
-    if (action === "启动训练" && !currentConfigProfile.computed_stats_exists) {
+    if (action !== "计算归一化统计" && !currentConfigProfile.computed_stats_exists) {
       toast("请先计算第二阶段共用的训练集归一化", true);
       return false;
     }
@@ -524,9 +525,13 @@ $("startExport").onclick = () => {
     episode_indices: rawEpisodes ? rawEpisodes.split(/[,，]/).map(Number) : null,
   });
 };
-$("startTrain").onclick = async () => {
+async function submitTraining(smoke = false) {
+  if (smoke && (!isStage2() || value("trainMode") === "resume")) {
+    toast("四卡预检需要选择第二阶段新实验及初始化权重", true);
+    return;
+  }
   await loadConfigProfile();
-  if (!(await confirmDataBinding("启动训练"))) return;
+  if (!(await confirmDataBinding(smoke ? "四卡预检（不保存模型）" : "启动训练"))) return;
   start("/api/jobs/train", {
     ...dataEnvironment(), openpi_root: value("openpiRoot"), config_name: value("trainConfig"),
     exp_name: value("expName"), checkpoint_base_dir: value("checkpointRoot"), cuda_devices: value("cudaDevices"),
@@ -540,8 +545,11 @@ $("startTrain").onclick = async () => {
     selection_suite: value("selectionSuite"), selection_keep: num("selectionKeep"),
     selection_denoise_steps: num("selectionDenoise"), init_checkpoint: value("initCheckpoint"),
     ...(isStage2() ? {counterfactual_manifest: value("quadManifest")} : {}),
+    ...(smoke ? {stage2_smoke_test: true} : {}),
   });
-};
+}
+$("startTrain").onclick = () => submitTraining();
+$("preflightTrain").onclick = () => submitTraining(true);
 $("createProbeSuite").onclick = async () => {
   try {
     const output = value("probeOutput");

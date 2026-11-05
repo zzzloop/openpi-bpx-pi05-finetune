@@ -18,6 +18,7 @@ CONFIGS = {
 }
 BASE_CONFIG = next(iter(CONFIGS))
 HORIZON = 30
+SAMPLING_PROTOCOL = "alternate_full_frame_permutation_and_aligned_quad_v2"
 SEMANTIC_EDGES = ((0, 1), (2, 3))
 SPATIAL_EDGES = ((0, 2), (1, 3))
 SWAP_EDGES = ((0, 3), (1, 2))
@@ -193,8 +194,13 @@ def heldout_probe_cases(split, records, max_cases):
     return result
 
 
+def is_aligned_step(step: int) -> bool:
+    """The same schedule is used for all four recipes, including on resume."""
+    return step % 2 == 1
+
+
 class QuadBatchSampler:
-    """One complete role-ordered quad per optimizer step, uniform across groups."""
+    """Alternate whole-trajectory CFM batches and aligned counterfactual quads."""
 
     def __init__(self, quads, records, episode_indices, seed):
         self.quads = quads
@@ -205,16 +211,34 @@ class QuadBatchSampler:
         for i in episode_indices:
             self.offsets[i] = offset
             offset += int(records[i]["length"])
+        self.frame_count = offset
+        if not self.quads or self.frame_count < 4:
+            raise ValueError("Stage-2 requires complete training quads and at least four training frames")
 
     def __iter__(self):
         step = self.start_step
+        cached_epoch = -1
+        permutation = []
         while True:
-            rng = random.Random(f"bpx-stage2:{self.seed}:{step}")
-            quad = self.quads[rng.randrange(len(self.quads))]
-            # The manifest supplies event-aligned windows, never whole-episode percentages.
-            phase = rng.random()
-            yield [(self.offsets[i] + lo + int(phase * (hi - lo + 1)), quad.attention)
-                   for i, (lo, hi) in zip(quad.episodes, quad.windows, strict=True)]
+            if is_aligned_step(step):
+                rng = random.Random(f"bpx-stage2-quad:{self.seed}:{step}")
+                quad = self.quads[rng.randrange(len(self.quads))]
+                # Event-aligned windows, not the same fraction of unrelated whole episodes.
+                phase = rng.random()
+                yield [(self.offsets[i] + lo + int(phase * (hi - lo + 1)), quad.attention)
+                       for i, (lo, hi) in zip(quad.episodes, quad.windows, strict=True)]
+            else:
+                # The first N whole-trajectory draws cover all N training frames, including
+                # prelude, transitions and termination. LeRobot owns normal tail padding.
+                batch = []
+                for draw in range(4 * (step // 2), 4 * (step // 2) + 4):
+                    epoch, position = divmod(draw, self.frame_count)
+                    if epoch != cached_epoch:
+                        permutation = list(range(self.frame_count))
+                        random.Random(f"bpx-stage2-full:{self.seed}:{epoch}").shuffle(permutation)
+                        cached_epoch = epoch
+                    batch.append((permutation[position], None))
+                yield batch
             step += 1
 
 

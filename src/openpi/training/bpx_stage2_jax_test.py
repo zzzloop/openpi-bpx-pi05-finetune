@@ -4,6 +4,7 @@ from flax import traverse_util
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from openpi.models import gemma
 from openpi.training import bpx_counterfactual as cf
@@ -43,8 +44,25 @@ def test_complete_quad_uses_one_noise_and_time():
     _, _, metrics = loss.objective(
         Oracle(), jax.random.key(3), None, actions,
         {"task_token_mask": None, "attention_edges": jnp.zeros((4, 4), dtype=bool)}, "ccfa_ours",
+        aligned=True,
     )
     np.testing.assert_allclose([metrics["cfm_loss"], metrics["nc_dfm_loss"]], 0, atol=1e-9)
+
+
+def test_whole_trajectory_updates_use_only_cfm():
+    class CfmOnly:
+        def compute_loss(self, _rng, _obs, _actions, *, train, shared_augmentation):
+            assert train and not shared_augmentation
+            return jnp.ones((4, 30))
+
+    model = CfmOnly()
+    _, total, metrics = loss.objective(
+        model, jax.random.key(3), None, jnp.zeros((4, 30, 32)), {}, "ccfa_ours", aligned=False,
+    )
+    assert total == metrics["cfm_loss"] == 1
+    assert metrics["nc_dfm_loss"] == metrics["attn_sem_loss"] == metrics["attn_swap_loss"] == 0
+    with pytest.raises(ValueError, match="sampler and optimizer disagree"):
+        loss.objective(model, jax.random.key(3), None, None, {}, "ccfa_ours", aligned=True)
 
 
 def test_probe_scan_matches_legacy_forward_and_is_differentiable(monkeypatch):

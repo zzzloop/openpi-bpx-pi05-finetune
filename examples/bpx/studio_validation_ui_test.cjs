@@ -10,6 +10,7 @@ const {chromium} = require('playwright');
     const page = await browser.newPage({viewport: {width: 1440, height: 1080}});
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
+    page.on('dialog', dialog => dialog.accept());
     const web = path.resolve(__dirname, '../../src/openpi/bpx_studio/web');
     const dataset = '/scratch/demo/lerobot/bpx/bpx_blocks_multitask_v2';
     const split = '/scratch/demo/reports/validation_split_v1.json';
@@ -38,15 +39,18 @@ const {chromium} = require('playwright');
       };
       else if (url.pathname === '/api/config-profile') {
         profileQueries.push(url.searchParams.get('validation_manifest'));
-        data = {dataset_path: dataset, repo_id: 'bpx/bpx_blocks_multitask_v2', dataset_exists: true,
+        const configName = url.searchParams.get('config_name');
+        data = {config_name: configName, dataset_path: dataset, repo_id: 'bpx/bpx_blocks_multitask_v2', dataset_exists: true,
           stats_paths_match: true, computed_stats_path: '/code/assets/test/norm_stats.json',
-          loaded_stats_path: '/code/assets/test/norm_stats.json', computed_stats_exists: false, purpose: 'test'};
+          loaded_stats_path: '/code/assets/test/norm_stats.json', computed_stats_exists: configName === stage2Config, purpose: 'test'};
       } else if (url.pathname === '/api/jobs/validation-split') {
         splitRequest = route.request().postDataJSON(); generated = true;
         data = {id: 'split-test', kind: 'validation_split', status: 'running'};
       } else if (url.pathname === '/api/jobs/export/hdf5') {
         exportRequests.push(route.request().postDataJSON());
         data = {id: 'export-test', kind: 'hdf5_export', status: 'running'};
+      } else if (url.pathname === '/api/jobs/train') {
+        data = {id: 'preflight-test', kind: 'train_preflight', status: 'running'};
       } else if (url.pathname === '/api/jobs') data = generated ? [{id:'split-test',kind:'validation_split',status:'succeeded',progress:{}},job] : [job];
       else if (url.pathname.endsWith('/metrics')) data = metrics;
       else if (url.pathname.endsWith('/log')) data = {text:'synthetic metrics'};
@@ -89,9 +93,17 @@ const {chromium} = require('playwright');
     await page.waitForFunction(() => document.querySelector('#validationManifest').value.endsWith('/cf/validation_split.json'));
     assert.equal(splitRequest.counterfactual_manifest, '/scratch/demo/reports/cf/quadruples.json');
     assert.equal(splitRequest.source_manifest, '');
+    const preflight = page.waitForRequest(req => req.url().endsWith('/api/jobs/train'));
+    await page.locator('#preflightTrain').click();
+    const trainRequest = (await preflight).postDataJSON();
+    assert.equal(trainRequest.stage2_smoke_test, true);
+    assert.equal(trainRequest.cuda_devices, '0,1,2,3');
+    assert.equal(trainRequest.config_name, stage2Config);
+    assert.equal(trainRequest.validation_manifest, '/scratch/demo/reports/cf/validation_split.json');
     await page.locator('#trainingRecipe').selectOption('pi05_bpx_cf_naive_full');
     assert.equal(await page.locator('#validationManifest').inputValue(), '/scratch/demo/reports/cf/validation_split.json');
     await page.locator('#trainingRecipe').selectOption('');
+    assert.equal(await page.locator('#preflightTrain').isVisible(), false);
     assert.equal(await page.locator('#cudaDevices').inputValue(), '2,3');
     assert.equal(await page.locator('#batchSize').inputValue(), '2');
     assert.equal(await page.locator('#validationManifest').inputValue(), split);

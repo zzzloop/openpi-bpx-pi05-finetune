@@ -51,14 +51,21 @@ def attention_loss(raw, mask):
     return masked_mean(semantic, mask[:2]), masked_mean(swap, mask[2:])
 
 
-def objective(model, rng, observation, actions, extras, mode):
-    if mode != "ccfa_ours":
+def objective(model, rng, observation, actions, extras, mode, *, aligned):
+    """The auxiliary losses exist only on explicitly aligned Group-4 batches."""
+    if mode == "ccfa_ours" and aligned != ("attention_edges" in extras):
+        raise ValueError("Stage-2 sampler and optimizer disagree about whether the batch is an aligned quad")
+    if mode != "ccfa_ours" or not aligned:
         metrics = {}
         if mode == "policy_cfg":
             dropout_rng = jax.random.fold_in(rng, 0x434647)
             observation, metrics["language_drop_rate"] = language_dropout(dropout_rng, observation, extras)
-        chunk = model.compute_loss(rng, observation, actions, train=True, shared_augmentation=True)
-        return chunk, jnp.mean(chunk), metrics
+        chunk = model.compute_loss(rng, observation, actions, train=True, shared_augmentation=aligned)
+        cfm = jnp.mean(chunk)
+        if mode == "ccfa_ours":
+            zero = jnp.zeros_like(cfm)
+            metrics = {"cfm_loss": cfm, "nc_dfm_loss": zero, "attn_sem_loss": zero, "attn_swap_loss": zero}
+        return chunk, cfm, metrics
 
     preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
     noise = jax.random.normal(noise_rng, actions.shape[1:])

@@ -229,6 +229,9 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
     mode = str(values.get("mode", "overwrite"))
     if mode not in {"overwrite", "resume"}:
         raise ValueError("训练模式只能是 overwrite 或 resume")
+    smoke = bool(values.get("stage2_smoke_test", False))
+    if smoke and (config not in bpx_counterfactual.CONFIGS or mode == "resume"):
+        raise ValueError("四卡预检只用于第二阶段新实验；请先选择新实验和初始化权重")
     stage2_args = ()
     if config in bpx_counterfactual.CONFIGS:
         if (set(map(int, cuda_devices.split(","))) != {0, 1, 2, 3}
@@ -250,13 +253,16 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
     if wandb_mode not in {"offline", "online", "disabled"}:
         raise ValueError("W&B 模式只能是 offline、online 或 disabled")
     experiment_dir = checkpoint_root / config / experiment
-    if mode == "overwrite" and experiment_dir.exists():
+    if mode == "overwrite" and not smoke and experiment_dir.exists():
         raise ValueError("实验目录已存在，请换一个实验名，或选择断点续训，避免覆盖 checkpoint")
     env = _data_environment({key: str(value) for key, value in values.items()})
     env.update(CUDA_VISIBLE_DEVICES=cuda_devices, XLA_PYTHON_CLIENT_MEM_FRACTION=f"{memory_fraction:.4g}")
     # Optional cloud tracking must not block the default dashboard workflow.
     # CheckpointManager creates this directory before wandb.init is called.
-    env.update(WANDB_MODE=wandb_mode, WANDB_DIR=str(experiment_dir))
+    if smoke:
+        env.update(WANDB_MODE="disabled")
+    else:
+        env.update(WANDB_MODE=wandb_mode, WANDB_DIR=str(experiment_dir))
     return CommandSpec(
         argv=(
             "uv",
@@ -271,14 +277,14 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
             f"--save-interval={save_interval}",
             f"--keep-period={keep_period}",
             *retention_arguments,
-            f"--{mode}",
+            "--stage2-smoke-test" if smoke else f"--{mode}",
             *_validation_arguments(values),
             *_selection_arguments(values),
             *stage2_args,
         ),
         cwd=root,
         env=env,
-        total_units=steps,
+        total_units=2 if smoke else steps,
     )
 
 

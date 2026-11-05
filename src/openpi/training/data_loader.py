@@ -358,7 +358,7 @@ class _QuadDataset:
     def __getitem__(self, item):
         index, attention = item
         result = self.dataset[index]
-        if self.mode == "ccfa_ours":
+        if self.mode == "ccfa_ours" and attention is not None:
             result["attention_edges"] = np.asarray(attention, dtype=bool)
         return result
 
@@ -376,10 +376,13 @@ class _Stage2DataLoader(DataLoader):
     def __iter__(self):
         names = {
             "policy_cfg": ("null_prompt", "null_prompt_mask"),
-            "ccfa_ours": ("task_token_mask", "attention_edges"),
+            "ccfa_ours": ("task_token_mask",),
         }.get(self.mode, ())
         for batch in self._loader:
-            yield _model.Observation.from_dict(batch), batch["actions"], {key: batch[key] for key in names}
+            extras = {key: batch[key] for key in names}
+            if self.mode == "ccfa_ours" and "attention_edges" in batch:
+                extras["attention_edges"] = batch["attention_edges"]
+            yield _model.Observation.from_dict(batch), batch["actions"], extras
 
 
 def _create_stage2_loader(config, data, sharding, num_batches):

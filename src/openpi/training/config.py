@@ -579,6 +579,8 @@ class TrainConfig:
     init_checkpoint: str | None = None
     # Only consumed by the four explicitly registered BPX Stage-2 configs.
     counterfactual_manifest: str | None = None
+    # Two optimizer updates in memory, without an experiment directory or W&B.
+    stage2_smoke_test: bool = False
     # Number of train steps (batches) to run.
     num_train_steps: int = 30_000
 
@@ -638,6 +640,8 @@ class TrainConfig:
         return nnx.All(nnx.Param, nnx.Not(self.freeze_filter))
 
     def __post_init__(self) -> None:
+        if self.stage2_smoke_test and (self.name not in _bpx_cf.CONFIGS or self.resume):
+            raise ValueError("Stage-2 preflight is only available for new BPX Stage-2 runs")
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
         if self.resume and self.init_checkpoint:

@@ -124,6 +124,7 @@ class TrainRequest(DataEnvironment):
     selection_denoise_steps: int = Field(default=10, ge=1, le=100)
     init_checkpoint: str = ""
     counterfactual_manifest: str = ""
+    stage2_smoke_test: bool = False
 
 
 class ProbeSuiteRequest(DataEnvironment):
@@ -504,7 +505,8 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
 
     @app.post("/api/jobs/train")
     def start_train(request: TrainRequest):
-        return start("train", lambda: build_train(request.model_dump()))
+        kind = "train_preflight" if request.stage2_smoke_test else "train"
+        return start(kind, lambda: build_train(request.model_dump()))
 
     @app.post("/api/jobs/serve")
     def start_serve(request: ServeRequest):
