@@ -13,6 +13,7 @@ import torch
 
 import openpi.models.model as _model
 import openpi.training.config as _config
+from openpi.training import bpx_counterfactual as _bpx_cf
 import openpi.training.validation_split as _validation_split
 from openpi.training.validation import reference_frame_indices
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
@@ -311,6 +312,11 @@ def create_data_loader(
     data_config = _validation_split.select_data_config(config, data_config, split)
     logging.info(f"data_config: {data_config}")
 
+    if config.name in _bpx_cf.CONFIGS and split == "train":
+        if framework != "jax" or skip_norm_stats or config.batch_size != 4:
+            raise ValueError("BPX Stage-2 requires JAX, normalized data, and global batch size 4")
+        return _create_stage2_loader(config, data_config, sharding, num_batches)
+
     if data_config.rlds_data_dir is not None:
         if config.validation_manifest:
             raise ValueError("Grouped validation currently supports LeRobot datasets, not RLDS")
@@ -339,6 +345,67 @@ def create_data_loader(
         sample_limit=config.validation_batches * config.batch_size if split != "train" else None,
         sample_seed=config.validation_seed,
     )
+
+
+class _QuadDataset:
+    def __init__(self, dataset, mode):
+        self.dataset = dataset
+        self.mode = mode
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, item):
+        index, attention = item
+        result = self.dataset[index]
+        if self.mode == "ccfa_ours":
+            result["attention_edges"] = np.asarray(attention, dtype=bool)
+        return result
+
+
+class _Stage2DataLoader(DataLoader):
+    def __init__(self, data_config, loader, sampler, mode):
+        self._config = data_config
+        self._loader = loader
+        self.sampler = sampler
+        self.mode = mode
+
+    def data_config(self):
+        return self._config
+
+    def __iter__(self):
+        names = {
+            "policy_cfg": ("null_prompt", "null_prompt_mask"),
+            "ccfa_ours": ("task_token_mask", "attention_edges"),
+        }.get(self.mode, ())
+        for batch in self._loader:
+            yield _model.Observation.from_dict(batch), batch["actions"], {key: batch[key] for key in names}
+
+
+def _create_stage2_loader(config, data, sharding, num_batches):
+    import pathlib
+
+    from openpi.training.bpx_stage2_transforms import extra_tokens
+
+    if not config.counterfactual_manifest or not config.validation_manifest or not data.episode_indices:
+        raise ValueError("Stage-2 requires the quadruple manifest and its immutable grouped validation split")
+    mode = _bpx_cf.CONFIGS[config.name]
+    quads, records = _bpx_cf.bound_quads(
+        pathlib.Path(config.counterfactual_manifest), pathlib.Path(lerobot_dataset.HF_LEROBOT_HOME) / data.repo_id,
+        pathlib.Path(config.validation_manifest), require_attention=mode == "ccfa_ours",
+    )
+    sampler = _bpx_cf.QuadBatchSampler(quads, records, data.episode_indices, config.seed)
+    dataset = create_torch_dataset(data, config.model.action_horizon, config.model)
+    if mode in {"policy_cfg", "ccfa_ours"}:
+        data = dataclasses.replace(data, model_transforms=dataclasses.replace(
+            data.model_transforms, inputs=extra_tokens(data.model_transforms.inputs, mode)
+        ))
+    dataset = _QuadDataset(transform_dataset(dataset, data), mode)
+    loader = TorchDataLoader(
+        dataset, local_batch_size=4, batch_sampler=sampler, sharding=sharding,
+        num_batches=num_batches, num_workers=config.num_workers, seed=config.seed,
+    )
+    return _Stage2DataLoader(data, loader, sampler, mode)
 
 
 def create_torch_data_loader(
@@ -479,6 +546,8 @@ class TorchDataLoader:
         sharding: jax.sharding.Sharding | None = None,
         shuffle: bool = False,
         sampler: torch.utils.data.Sampler | None = None,
+        batch_sampler=None,
+        drop_last: bool = True,
         num_batches: int | None = None,
         num_workers: int = 0,
         seed: int = 0,
@@ -521,17 +590,18 @@ class TorchDataLoader:
 
         generator = torch.Generator()
         generator.manual_seed(seed)
+        batching = ({"batch_sampler": batch_sampler} if batch_sampler is not None else {
+            "batch_size": local_batch_size, "shuffle": sampler is None and shuffle,
+            "sampler": sampler, "drop_last": drop_last,
+        })
         self._data_loader = torch.utils.data.DataLoader(
             typing.cast(torch.utils.data.Dataset, dataset),
-            batch_size=local_batch_size,
-            shuffle=(sampler is None and shuffle),  # Don't shuffle if using sampler
-            sampler=sampler,
+            **batching,
             num_workers=num_workers,
             multiprocessing_context=mp_context,
             persistent_workers=num_workers > 0,
             collate_fn=_collate_fn,
             worker_init_fn=_worker_init_fn,
-            drop_last=True,
             generator=generator,
         )
 

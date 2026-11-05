@@ -25,6 +25,7 @@ import openpi.models.model as _model
 import openpi.shared.array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.checkpoints as _checkpoints
+from openpi.training import bpx_counterfactual as _bpx_cf
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 import openpi.training.monitoring as _monitoring
@@ -111,7 +112,8 @@ def init_train_state(
 
         params = nnx.state(model)
         # Convert frozen params to bfloat16.
-        params = nnx_utils.state_map(params, config.freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
+        if _bpx_cf.CONFIGS.get(config.name) != "partial_ft":
+            params = nnx_utils.state_map(params, config.freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
 
         return training_utils.TrainState(
             step=0,
@@ -148,26 +150,34 @@ def train_step(
     config: _config.TrainConfig,
     rng: at.KeyArrayLike,
     state: training_utils.TrainState,
-    batch: tuple[_model.Observation, _model.Actions],
+    batch: tuple[_model.Observation, _model.Actions] | tuple[_model.Observation, _model.Actions, dict[str, at.Array]],
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
     model.train()
+    stage2 = _bpx_cf.CONFIGS.get(config.name)
 
     @at.typecheck
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        chunked_loss = model.compute_loss(rng, observation, actions, train=True)
+        if stage2 is None:
+            chunked_loss = model.compute_loss(rng, observation, actions, train=True)
+            total, extra_metrics = jnp.mean(chunked_loss), {}
+        else:
+            from openpi.training.bpx_stage2_loss import objective
+
+            chunked_loss, total, extra_metrics = objective(model, rng, observation, actions, batch[2], stage2)
         horizon_reduce_axes = tuple(range(chunked_loss.ndim - 1))
-        return jnp.mean(chunked_loss), {
+        return total, {
             "loss_std": jnp.std(chunked_loss),
             "loss_min": jnp.min(chunked_loss),
             "loss_max": jnp.max(chunked_loss),
             "loss_by_horizon": jnp.mean(chunked_loss, axis=horizon_reduce_axes),
+            **extra_metrics,
         }
 
     train_rng = jax.random.fold_in(rng, state.step)
-    observation, actions = batch
+    observation, actions = batch[:2]
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
@@ -220,8 +230,50 @@ def eval_step(model_def, params, rng, batch):
     return jnp.mean(model.compute_loss(rng, observation, actions, train=False))
 
 
+def _stage2_protocol(config, initial_source):
+    """Validate before checkpoint directory setup; record immutable resume inputs."""
+    from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
+
+    mode = _bpx_cf.CONFIGS[config.name]
+    if not config.counterfactual_manifest or not config.validation_manifest:
+        raise ValueError("Stage-2 requires both the quadruple manifest and its grouped validation split")
+    if not config.resume and initial_source is None:
+        raise ValueError("New Stage-2 runs must initialize from the common Stage-1 18000 checkpoint")
+    if not config.resume and config.checkpoint_dir.exists():
+        raise FileExistsError("Stage-2 never overwrites an existing experiment; choose another name or resume")
+    if (config.batch_size != 4 or config.fsdp_devices != 4 or jax.process_count() != 1
+            or jax.device_count() != 4 or any(device.platform != "gpu" for device in jax.devices())):
+        raise ValueError("BPX Stage-2 requires one host, four GPU devices, global batch size 4, and FSDP=4")
+    if not getattr(config.model, "pi05", False) or (config.model.action_horizon, config.model.action_dim) != (30, 32):
+        raise ValueError("BPX Stage-2 requires the Stage-1 Pi05 architecture (horizon 30, padded action dim 32)")
+    quad_path = pathlib.Path(config.counterfactual_manifest)
+    split_path = pathlib.Path(config.validation_manifest)
+    dataset = pathlib.Path(HF_LEROBOT_HOME) / config.data.repo_id
+    _bpx_cf.bound_quads(quad_path, dataset, split_path, require_attention=mode == "ccfa_ours")
+    stats = config.assets_dirs / config.data.repo_id / "norm_stats.json"
+    if not stats.is_file():
+        raise ValueError(f"Compute shared Stage-2 TRAIN-ONLY normalization first: {stats}")
+    protocol = {
+        "schema_version": 1, "method": mode, "repo_id": config.data.repo_id, "seed": config.seed,
+        "quad_sha256": hashlib.sha256(quad_path.read_bytes()).hexdigest(),
+        "split_digest": _validation_split.split_digest(split_path),
+        "norm_sha256": hashlib.sha256(stats.read_bytes()).hexdigest(),
+        "model": repr(config.model), "optimizer": repr(config.optimizer), "lr_schedule": repr(config.lr_schedule),
+        "ema_decay": config.ema_decay,
+        "initial_checkpoint": str(initial_source) if initial_source else None,
+    }
+    path = config.checkpoint_dir / "monitoring/stage2_protocol.json"
+    if config.resume:
+        previous = json.loads(path.read_text(encoding="utf-8"))
+        protocol["initial_checkpoint"] = previous["initial_checkpoint"]
+        if previous != protocol:
+            raise ValueError("Stage-2 resume settings differ from the saved experiment protocol")
+    return path, protocol
+
+
 def main(config: _config.TrainConfig):
     config = _validation_split.configure(config)
+    source = None
     if config.init_checkpoint:
         source = pathlib.Path(config.init_checkpoint).expanduser().resolve()
         if source.suffix == ".json":
@@ -231,6 +283,8 @@ def main(config: _config.TrainConfig):
         if source.resolve().is_relative_to(pathlib.Path(config.checkpoint_dir).resolve()):
             raise ValueError("Initialization weights must be in a DIFFERENT experiment; do not overwrite their source run")
         config = dataclasses.replace(config, weight_loader=_weight_loaders.CheckpointWeightLoader(str(source / "params")))
+    stage2 = _bpx_cf.CONFIGS.get(config.name)
+    stage2_protocol = _stage2_protocol(config, source) if stage2 else None
     if config.selection_suite:
         if jax.process_count() != 1:
             raise NotImplementedError("Checkpoint selection currently supports one host with FSDP, not multi-host")
@@ -255,11 +309,20 @@ def main(config: _config.TrainConfig):
     checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
         config.checkpoint_dir,
         keep_period=config.keep_period,
-        overwrite=config.overwrite,
+        overwrite=config.overwrite and stage2 is None,
         resume=config.resume,
         checkpoint_limit=config.checkpoint_limit,
         selection_keep=config.selection_keep if config.selection_suite else None,
     )
+    if stage2_protocol:
+        path, protocol = stage2_protocol
+        if config.resume and not resuming:
+            raise ValueError("Stage-2 resume requires a complete resumable checkpoint")
+        if not resuming:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _selection.atomic_json(path, protocol)
+            shutil.copyfile(config.counterfactual_manifest, path.with_name("quadruples.json"))
+        logging.info("BPX Stage-2: %s; global batch=4, FSDP=4, init=%s", stage2, protocol["initial_checkpoint"])
     ordinary_keep, _, archive_keep = _checkpoints.retention_budget(
         config.checkpoint_limit, config.keep_period, config.selection_keep if config.selection_suite else None,
     )
@@ -304,6 +367,10 @@ def main(config: _config.TrainConfig):
 
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
+        if stage2:
+            data_loader.sampler.start_step = int(train_state.step)
+            data_iter = iter(data_loader)
+            batch = next(data_iter)
 
     ptrain_step = jax.jit(
         functools.partial(train_step, config),
@@ -340,6 +407,8 @@ def main(config: _config.TrainConfig):
                     "sampling": "task_stratified_without_replacement"}
         if config.selection_suite:
             identity["mode"] = "servable_ema_or_current_train_false"
+        if stage2:
+            identity["training_method"] = stage2
         stats_asset = data_loader.data_config().asset_id or config.data.repo_id
         stats_path = pathlib.Path(config.assets_dirs) / stats_asset / "norm_stats.json"
         identity["norm_stats_sha256"] = hashlib.sha256(stats_path.read_bytes()).hexdigest()
@@ -437,7 +506,8 @@ def main(config: _config.TrainConfig):
                               "inference_params": "ema" if train_state.ema_params is not None else "current",
                               "initial_checkpoint": config.init_checkpoint,
                               "selection_policy": probe_runtime.manifest.get("selection_policy", {}),
-                              "loss_function": "UNCHANGED compute_loss; diagnostics never enter gradients"}
+                              "loss_function": (f"Stage-2 {stage2}; diagnostics never enter gradients" if stage2
+                                                else "UNCHANGED compute_loss; diagnostics never enter gradients")}
         if config.checkpoint_limit is not None:
             selection_identity["checkpoint_limit"] = config.checkpoint_limit
         selection_identity.update(

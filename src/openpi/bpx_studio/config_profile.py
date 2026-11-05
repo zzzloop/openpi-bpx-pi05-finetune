@@ -6,6 +6,8 @@ import ast
 import dataclasses
 import pathlib
 
+from openpi.training import bpx_counterfactual
+
 
 @dataclasses.dataclass(frozen=True)
 class AssetBinding:
@@ -44,6 +46,7 @@ def read_config_binding(project_root: pathlib.Path, config_name: str) -> ConfigB
     source = project_root / "src/openpi/training/config.py"
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     defaults = {}
+    source_name = bpx_counterfactual.BASE_CONFIG if config_name in bpx_counterfactual.CONFIGS else config_name
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and node.name in ("TrainConfig", "AssetsConfig"):
             for field in node.body:
@@ -54,7 +57,7 @@ def read_config_binding(project_root: pathlib.Path, config_name: str) -> ConfigB
             continue
         fields = {item.arg: item.value for item in node.keywords if item.arg is not None}
         name = fields.get("name")
-        if not isinstance(name, ast.Constant) or name.value != config_name:
+        if not isinstance(name, ast.Constant) or name.value != source_name:
             continue
         if "data" not in fields:
             raise ValueError(f"Config '{config_name}' 没有可预览的 LeRobot data 定义")

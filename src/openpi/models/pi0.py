@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 
 import einops
@@ -187,10 +188,13 @@ class Pi0(_model.BaseModel):
 
     @override
     def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *,
+        train: bool = False, shared_augmentation: bool = False,
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
-        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+        observation = _model.preprocess_observation(
+            preprocess_rng, observation, train=train, shared_augmentation=shared_augmentation
+        )
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
@@ -212,6 +216,21 @@ class Pi0(_model.BaseModel):
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+
+    def counterfactual_velocity(self, rng, observation, noisy_actions, time, task_token_mask):
+        """Joint flow and differentiable text-to-left-eye attention for the opt-in CCFA loss."""
+        observation = _model.preprocess_observation(rng, observation, train=True, shared_augmentation=True)
+        prefix, prefix_mask, prefix_ar = self.embed_prefix(observation)
+        suffix, suffix_mask, suffix_ar, condition = self.embed_suffix(observation, noisy_actions, time)
+        mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+        ar = jnp.concatenate([prefix_ar, suffix_ar], axis=0)
+        patches = (prefix.shape[1] - task_token_mask.shape[1]) // len(observation.images)
+        (_, output), _, attention = self.PaliGemma.llm(
+            [prefix, suffix], mask=make_attn_mask(mask, ar), positions=jnp.cumsum(mask, axis=1) - 1,
+            adarms_cond=[None, condition],
+            attention_probe=(task_token_mask & observation.tokenized_prompt_mask, prefix_mask[:, :patches]),
+        )
+        return self.action_out_proj(output[:, -self.action_horizon:]), attention
 
     def evaluation_velocity(self, observation: _model.Observation, noisy_actions: _model.Actions, timestep=1.0):
         """Read-only flow field for diagnostics; never called by the training loss.
@@ -239,6 +258,10 @@ class Pi0(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
+        null_prompt: at.Int[at.Array, "b l"] | None = None,
+        null_prompt_mask: at.Bool[at.Array, "b l"] | None = None,
+        cfg_scale: float = 2.0,
+        cfg_min_time: float = 0.7,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
@@ -253,6 +276,17 @@ class Pi0(_model.BaseModel):
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        if null_prompt is not None:
+            if null_prompt_mask is None or not self.pi05:
+                raise ValueError("Stage-2 CFG needs Pi05 and a complete null-task token view")
+            unconditional = dataclasses.replace(
+                observation, tokenized_prompt=null_prompt, tokenized_prompt_mask=null_prompt_mask
+            )
+            null_tokens, null_mask, null_ar = self.embed_prefix(unconditional)
+            _, null_cache = self.PaliGemma.llm(
+                [null_tokens, None], mask=make_attn_mask(null_mask, null_ar),
+                positions=jnp.cumsum(null_mask, axis=1) - 1,
+            )
 
         def step(carry):
             x_t, time = carry
@@ -262,29 +296,26 @@ class Pi0(_model.BaseModel):
             # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
             # other
             suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-            # `prefix_attn_mask` is shape (b, suffix_len, prefix_len) indicating how the suffix tokens can attend to the
-            # prefix tokens
-            prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
-            # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
-            # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
-            full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
-            assert full_attn_mask.shape == (
-                batch_size,
-                suffix_tokens.shape[1],
-                prefix_tokens.shape[1] + suffix_tokens.shape[1],
-            )
-            # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
-            positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+            def velocity(context_mask, cache):
+                prefix_attn_mask = einops.repeat(context_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+                positions = jnp.sum(context_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+                (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+                    [None, suffix_tokens],
+                    mask=jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1),
+                    positions=positions,
+                    kv_cache=cache,
+                    adarms_cond=[None, adarms_cond],
+                )
+                assert prefix_out is None
+                return self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-                [None, suffix_tokens],
-                mask=full_attn_mask,
-                positions=positions,
-                kv_cache=kv_cache,
-                adarms_cond=[None, adarms_cond],
-            )
-            assert prefix_out is None
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            v_t = velocity(prefix_mask, kv_cache)
+            if null_prompt is not None:
+                def guided(v_cond):
+                    v_null = velocity(null_mask, null_cache)
+                    return v_cond + (jnp.asarray(cfg_scale, dtype=v_cond.dtype) - 1) * (v_cond - v_null)
+
+                v_t = jax.lax.cond((time + 1e-6 >= cfg_min_time) & (cfg_scale != 1.0), guided, lambda v: v, v_t)
 
             return x_t + dt * v_t, time + dt
 

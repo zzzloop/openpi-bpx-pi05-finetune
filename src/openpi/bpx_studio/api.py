@@ -35,6 +35,7 @@ from openpi.bpx_studio.config_profile import read_config_binding
 from openpi.bpx_studio.status_probe import CachedProbe
 from openpi.bpx_studio.spike_viewer import load_spike_trace
 from openpi.bpx_studio.spike_viewer import summarize_spike_report
+from openpi.training import bpx_counterfactual
 
 DEFAULT_DATA_ROOT = pathlib.Path("/scratch/bpx_datasets")
 DEFAULT_CONFIG_NAME = "pi05_bpx_full_low_mem_multitask_v2"
@@ -46,6 +47,10 @@ BPX_CONFIG_PURPOSES = {
     "pi05_bpx_full_low_mem_multitask_v2": "第一代 BPX 多任务 v2: 裁减固定轨迹并按任务均衡采样的低显存全参数微调。",
     "pi05_bpx_full_low_mem_v1_base_estimated": "第一代80条基础集的估计反馈试验：非真实反馈修复，使用独立数据/统计/模型，不能作实机安全或VLM保留证明。",
     "pi05_bpx_lora": "第一代 BPX LoRA 对照实验: bpx_blocks 数据集, 仅训练低秩适配参数。",
+    "pi05_bpx_cf_naive_full": "第二阶段 · 组1：原始 CFM，全参数微调。",
+    "pi05_bpx_cf_policy_cfg": "第二阶段 · 组2：全参数 CFM，训练语言 dropout 15%，推理前段启用 CFG。",
+    "pi05_bpx_cf_partial_ft": "第二阶段 · 组3：冻结视觉语言主干，全训动作专家和动作投影。",
+    "pi05_bpx_cf_ours": "第二阶段 · 组4：同一四元组共享噪声与时间，CFM + NC-DFM + 注意力监督。",
 }
 
 
@@ -62,6 +67,7 @@ class ValidationSplitRequest(BaseModel):
     dataset_root: str
     output_path: str
     source_manifest: str = ""
+    counterfactual_manifest: str = ""
     independent_episodes: bool = False
     fraction: float = Field(default=0.1, gt=0, lt=0.5)
 
@@ -117,6 +123,7 @@ class TrainRequest(DataEnvironment):
     selection_keep: int = Field(default=3, ge=1, le=20)
     selection_denoise_steps: int = Field(default=10, ge=1, le=100)
     init_checkpoint: str = ""
+    counterfactual_manifest: str = ""
 
 
 class ProbeSuiteRequest(DataEnvironment):
@@ -194,7 +201,8 @@ def _checkpoints(checkpoint_root: pathlib.Path) -> list[dict[str, str | int]]:
 def _next_experiment(checkpoint_root: pathlib.Path, config_name: str) -> str:
     if pathlib.Path(config_name).name != config_name or not config_name:
         raise ValueError("config_name 不是安全的单级名称")
-    prefix = f"{DEFAULT_DATASET_NAME}_bs2_v"
+    stage2 = bpx_counterfactual.CONFIGS.get(config_name)
+    prefix = f"bpx_{stage2}_bs4_v" if stage2 else f"{DEFAULT_DATASET_NAME}_bs2_v"
     existing = {path.name for path in (checkpoint_root / config_name).glob(f"{prefix}*")}
     for version in range(1, 10000):
         candidate = f"{prefix}{version:03d}"
@@ -220,8 +228,10 @@ def _config_profile(
         raise ValueError(f"Config '{train_config.name}' 没有可用的 LeRobot repo_id")
 
     dataset_path = (lerobot_root / pathlib.Path(repo_id)).resolve()
+    stats_namespace = (bpx_counterfactual.BASE_CONFIG if train_config.name in bpx_counterfactual.CONFIGS
+                       else train_config.name)
     computed_stats_dir = (
-        _absolute_from_project(project_root, train_config.assets_base_dir) / train_config.name / repo_id
+        _absolute_from_project(project_root, train_config.assets_base_dir) / stats_namespace / repo_id
     )
     assets = getattr(data_factory, "assets", None)
     configured_assets_dir = getattr(assets, "assets_dir", None) if assets is not None else None
@@ -229,7 +239,7 @@ def _config_profile(
     loaded_assets_root = (
         _absolute_from_project(project_root, configured_assets_dir)
         if configured_assets_dir
-        else _absolute_from_project(project_root, train_config.assets_base_dir) / train_config.name
+        else _absolute_from_project(project_root, train_config.assets_base_dir) / stats_namespace
     )
     loaded_stats_dir = (loaded_assets_root / asset_id).resolve()
     purpose = BPX_CONFIG_PURPOSES.get(
@@ -332,6 +342,9 @@ def create_app(*, state_dir: pathlib.Path, project_root: pathlib.Path, data_root
             "default_workers": 32,
             "default_config_name": DEFAULT_CONFIG_NAME,
             "known_config_names": list(BPX_CONFIG_PURPOSES),
+            "stage2_configs": bpx_counterfactual.CONFIGS,
+            "stage2_initial_checkpoint": bpx_counterfactual.INITIAL_CHECKPOINT,
+            "stage2_report_root": str(data_root / "reports/bpx_v1_counterfactual_v001"),
             "default_experiment_name": _next_experiment(checkpoint_root, DEFAULT_CONFIG_NAME),
             **default_paths(data_root),
         }

@@ -24,6 +24,7 @@ import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
+from openpi.training import bpx_counterfactual as _bpx_cf
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
 import openpi.training.misc.roboarena_config as roboarena_config
@@ -576,6 +577,8 @@ class TrainConfig:
     selection_denoise_steps: int = 10
     # Weight-only initialization for a NEW finetuning run; never restores optimizer/step.
     init_checkpoint: str | None = None
+    # Only consumed by the four explicitly registered BPX Stage-2 configs.
+    counterfactual_manifest: str | None = None
     # Number of train steps (batches) to run.
     num_train_steps: int = 30_000
 
@@ -619,7 +622,8 @@ class TrainConfig:
     @property
     def assets_dirs(self) -> pathlib.Path:
         """Get the assets directory for this config."""
-        return (pathlib.Path(self.assets_base_dir) / self.name).resolve()
+        namespace = _bpx_cf.BASE_CONFIG if self.name in _bpx_cf.CONFIGS else self.name
+        return (pathlib.Path(self.assets_base_dir) / namespace).resolve()
 
     @property
     def checkpoint_dir(self) -> pathlib.Path:
@@ -1295,10 +1299,41 @@ _CONFIGS = [
         exp_name="debug_pi05",
         wandb_enabled=False,
     ),
+    TrainConfig(
+        name="pi05_bpx_cf_naive_full",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30),
+        data=LeRobotBpxDataConfig(
+            repo_id="bpx/bpx_v1_counterfactual_v001",
+            assets=AssetsConfig(asset_id="bpx/bpx_v1_counterfactual_v001"),
+            default_prompt=None,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        batch_size=4,
+        fsdp_devices=4,
+        ema_decay=None,
+        num_train_steps=10_000,
+        save_interval=1000,
+        checkpoint_limit=3,
+        monitoring_enabled=True,
+        monitoring_action_names=bpx_constants.BPX_EFFECTIVE_JOINT_NAMES,
+        policy_metadata={
+            "fps": bpx_constants.BPX_FPS,
+            "action_horizon": 30,
+            "raw_action_dim": bpx_constants.BPX_RAW_DIM,
+            "effective_action_dim": bpx_constants.BPX_EFFECTIVE_DIM,
+        },
+    ),
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
 ]
+
+_bpx_cf_base = next(config for config in _CONFIGS if config.name == _bpx_cf.BASE_CONFIG)
+_CONFIGS.extend(
+    dataclasses.replace(_bpx_cf_base, name=name,
+                        freeze_filter=_bpx_cf.is_vlm_parameter if method == "partial_ft" else nnx.Nothing())
+    for name, method in _bpx_cf.CONFIGS.items() if name != _bpx_cf.BASE_CONFIG
+)
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")

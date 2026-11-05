@@ -10,6 +10,7 @@ to the config assets directory.
 
 import dataclasses
 import faulthandler
+import math
 import os
 
 
@@ -48,6 +49,8 @@ def create_torch_dataloader(
     model_config: _model.BaseModelConfig,
     num_workers: int,
     max_frames: int | None = None,
+    *,
+    include_last: bool = False,
 ) -> tuple[_data_loader.Dataset, int]:
     if data_config.repo_id is None:
         raise ValueError("Data config must have a repo_id")
@@ -67,7 +70,7 @@ def create_torch_dataloader(
         num_batches = max_frames // batch_size
         shuffle = True
     else:
-        num_batches = len(dataset) // batch_size
+        num_batches = math.ceil(len(dataset) / batch_size) if include_last else len(dataset) // batch_size
         shuffle = False
     sampler = _data_loader.create_task_balanced_sampler(data_config, len(dataset), seed=0)
     _stage(
@@ -81,6 +84,8 @@ def create_torch_dataloader(
         shuffle=shuffle and sampler is None,
         sampler=sampler,
         num_batches=num_batches,
+        drop_last=not include_last,
+        framework="pytorch" if include_last else "jax",
     )
     return data_loader, num_batches
 
@@ -133,6 +138,15 @@ def main(
     """
     _stage(f"解析 Config 及训练/验证划分：{config_name}")
     config = _config.get_config(config_name)
+    from openpi.training.bpx_counterfactual import CONFIGS as STAGE2_CONFIGS
+
+    stage2 = config_name in STAGE2_CONFIGS
+    if stage2:
+        split = _validation_split.load_split(validation_manifest) if validation_manifest else {}
+        if split.get("grouping") != "bpx_counterfactual_quads" or not split.get("quad_manifest_sha256"):
+            raise ValueError("Stage-2 normalization requires its quadruple holdout; do not include held-out episodes")
+        if max_frames is not None:
+            raise ValueError("Stage-2 uses one common normalization computed from all training episodes")
     config = _validation_split.configure(dataclasses.replace(config, validation_manifest=validation_manifest))
     effective_num_workers = config.num_workers if num_workers is None else num_workers
     if effective_num_workers < 0:
@@ -157,6 +171,7 @@ def main(
             config.model,
             effective_num_workers,
             max_frames,
+            include_last=stage2,
         )
 
     keys = ["state", "actions"]

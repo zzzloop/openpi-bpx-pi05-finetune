@@ -13,6 +13,8 @@ import pathlib
 
 import numpy as np
 
+from openpi.training import bpx_counterfactual
+
 
 def norm_digest(data_config) -> str:
     values = {key: {name: np.asarray(getattr(stats, name)).tolist()
@@ -103,6 +105,10 @@ def prepare_suite(config, output: pathlib.Path, *, case_spec: pathlib.Path | Non
             evidence = case_spec.resolve().parent / evidence
         spec["external_assessments"] = str(evidence.resolve())
     cases = spec.get("cases")
+    if cases is None and config.name in bpx_counterfactual.CONFIGS:
+        if split.get("grouping") != "bpx_counterfactual_quads":
+            raise ValueError("Stage-2 probes require the quadruple holdout")
+        cases = bpx_counterfactual.heldout_probe_cases(split, records, max_cases)
     if cases is None:
         # A usable DIAGNOSTIC template, not fabricated semantic annotations.
         tasks = sorted({records[i]["tasks"][0] for i in split["validation_episodes"]})
@@ -140,9 +146,15 @@ def prepare_suite(config, output: pathlib.Path, *, case_spec: pathlib.Path | Non
         raise ValueError("Use at least two distinct, fixed, nonnegative noise seeds")
     raw_dataset = data_loader.create_torch_dataset(
         dataclasses.replace(data, episode_indices=None, balance_by_task=False), config.model.action_horizon, config.model)
+    cfg = bpx_counterfactual.CONFIGS.get(config.name) == "policy_cfg"
+    model_inputs = data.model_transforms.inputs
+    if cfg:
+        from openpi.training.bpx_stage2_transforms import extra_tokens
+
+        model_inputs = extra_tokens(model_inputs, "policy_cfg")
     pipeline = transforms.compose([
         *data.repack_transforms.inputs, *data.data_transforms.inputs,
-        transforms.Normalize(data.norm_stats, use_quantiles=data.use_quantile_norm), *data.model_transforms.inputs,
+        transforms.Normalize(data.norm_stats, use_quantiles=data.use_quantile_norm), *model_inputs,
     ])
     payload = {f"noise/{seed}": np.random.default_rng(seed).standard_normal(
         (config.model.action_horizon, config.model.action_dim)).astype(np.float32) for seed in seeds}
@@ -178,6 +190,9 @@ def prepare_suite(config, output: pathlib.Path, *, case_spec: pathlib.Path | Non
                 for key, value in shared.items():
                     payload[f"{number}/common/{key}"] = value
                 payload[f"{number}/target"] = np.asarray(transformed["actions"])
+                if cfg:
+                    for key in ("null_prompt", "null_prompt_mask"):
+                        payload[f"{number}/cfg/{key}"] = np.asarray(transformed[key])
             else:
                 if shared.keys() != common.keys() or any(not np.array_equal(shared[key], common[key]) for key in common):
                     raise ValueError("Prompt variants changed observation/state; invalid counterfactual control")
@@ -209,6 +224,10 @@ def prepare_suite(config, output: pathlib.Path, *, case_spec: pathlib.Path | Non
                 "external_assessments": spec.get("external_assessments"),
                 "cf_definition": "E_noise sum_(h,d) (v_L1-v_L2)^2; paper noise t=0 -> OpenPI t=1",
                 "limits": "offline probes, not task success or a general VLM benchmark"}
+    if cfg:
+        from openpi.training.bpx_stage2_loss import CFG_MIN_TIME, DEFAULT_CFG_SCALE
+
+        manifest["cfg"] = {"cfg_scale": DEFAULT_CFG_SCALE, "cfg_min_time": CFG_MIN_TIME}
     (output / "suite.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "editable_case_spec.json").write_text(json.dumps({"cases": frozen, "noise_seeds": seeds,
         "active_dims": active, "continuous_dims": continuous, "gates": spec.get("gates", {}),
@@ -256,17 +275,24 @@ class ProbeRuntime:
             self.arrays = {key: arrays[key].copy() for key in arrays.files}
         self.digest = hashlib.sha256(path.read_bytes()).hexdigest()
 
-        def forward(params, observation, noise):
+        cfg = manifest.get("cfg", {})
+        if bool(cfg) != (bpx_counterfactual.CONFIGS.get(config.name) == "policy_cfg"):
+            raise ValueError("Probe suite CFG mode differs from training: rebuild the suite")
+
+        def forward(params, observation, noise, null_tokens=None):
             model = nnx.merge(model_def, params)
             model.eval()
             if not hasattr(model, "evaluation_velocity"):
                 raise ValueError("CF velocity probes support Pi0/Pi05, not FAST/PyTorch")
             velocity = model.evaluation_velocity(observation, noise, timestep=1.0)
             actions = model.sample_actions(jax.random.key(0), observation, noise=noise,
-                                           num_steps=config.selection_denoise_steps)
+                                           num_steps=config.selection_denoise_steps, **cfg, **(null_tokens or {}))
             return actions, velocity
 
-        self.forward = jax.jit(forward, in_shardings=(params_sharding, data_sharding, data_sharding))
+        input_shardings = (params_sharding, data_sharding, data_sharding)
+        if cfg:
+            input_shardings += (data_sharding,)
+        self.forward = jax.jit(forward, in_shardings=input_shardings)
 
     def evaluate(self, params) -> tuple[dict, list[dict], dict]:
         import jax
@@ -297,6 +323,11 @@ class ProbeRuntime:
                     lambda value: jax.make_array_from_process_local_data(self.sharding, value), host)
             horizon = int(case["valid_horizon"])
             target = arrays[f"{number}/target"][:horizon]
+            null_tokens = {}
+            if manifest.get("cfg"):
+                for key in ("null_prompt", "null_prompt_mask"):
+                    token = np.repeat(arrays[f"{number}/cfg/{key}"][None], self.config.batch_size, axis=0)
+                    null_tokens[key] = jax.make_array_from_process_local_data(self.sharding, token)
             for seed in manifest["noise_seeds"]:
                 # Same observation, state and epsilon for ALL prompt variants.
                 noise = arrays[f"noise/{seed}"][None]
@@ -305,7 +336,8 @@ class ProbeRuntime:
                 outputs = {}
                 for variant, obs in observations.items():
                     with sharding.set_mesh(self.mesh):
-                        action, velocity = jax.device_get(self.forward(params, obs, noise))
+                        args = (params, obs, noise, null_tokens) if null_tokens else (params, obs, noise)
+                        action, velocity = jax.device_get(self.forward(*args))
                     outputs[variant] = (np.asarray(action[0], dtype=np.float32), np.asarray(velocity[0], dtype=np.float32))
                 predicted, velocity = outputs["matched"]
                 other, other_velocity = outputs["counterfactual"]

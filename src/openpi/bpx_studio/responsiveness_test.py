@@ -31,6 +31,20 @@ def test_reads_actual_config_bindings_without_imports(name, repo, assets):
     assert binding.assets_base_dir == "./assets"
 
 
+def test_stage2_configs_share_norm_paths_but_not_experiment_names(tmp_path):
+    from openpi.training.bpx_counterfactual import CONFIGS
+
+    paths = set()
+    for name in CONFIGS:
+        profile = api._config_profile(
+            project_root=PROJECT, lerobot_root=tmp_path, train_config=read_config_binding(PROJECT, name),
+        )
+        assert profile["stats_paths_match"] and profile["repo_id"] == "bpx/bpx_v1_counterfactual_v001"
+        paths.add(profile["loaded_stats_path"])
+        assert api._next_experiment(tmp_path, name).startswith(f"bpx_{CONFIGS[name]}_bs4_")
+    assert len(paths) == 1
+
+
 def test_static_reader_does_not_execute_source_or_guess_dynamic_values(tmp_path):
     source = tmp_path / "src/openpi/training/config.py"
     source.parent.mkdir(parents=True)

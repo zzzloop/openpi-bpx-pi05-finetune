@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import dataclasses
+import hashlib
 import pathlib
 import re
 import sys
+
+from openpi.training import bpx_counterfactual
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _CUDA_DEVICES = re.compile(r"^[0-9]+(?:,[0-9]+)*$")
@@ -182,6 +185,8 @@ def build_normalize(values: Mapping[str, object]) -> CommandSpec:
     config = _name(str(values["config_name"]), "训练配置名")
     workers = _positive(int(values.get("workers", 32)), "workers", maximum=256)
     env = _data_environment({key: str(value) for key, value in values.items()})
+    if config in bpx_counterfactual.CONFIGS:
+        _require_stage2_split(values)
     # Statistics use NumPy, not model inference. Do not initialize the server's
     # CUDA devices just to create the loader's otherwise-unused JAX sharding.
     # This environment belongs ONLY to the normalization child process.
@@ -224,6 +229,23 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
     mode = str(values.get("mode", "overwrite"))
     if mode not in {"overwrite", "resume"}:
         raise ValueError("训练模式只能是 overwrite 或 resume")
+    stage2_args = ()
+    if config in bpx_counterfactual.CONFIGS:
+        if (set(map(int, cuda_devices.split(","))) != {0, 1, 2, 3}
+                or fsdp_devices != 4 or batch_size != 4):
+            raise ValueError("第二阶段使用 GPU 0,1,2,3，global BS=4，FSDP=4")
+        split = _require_stage2_split(values)
+        raw_quad = str(values.get("counterfactual_manifest", "")).strip()
+        if not raw_quad:
+            raise ValueError("第二阶段必须提供四元组 manifest")
+        quad = pathlib.Path(raw_quad).expanduser().resolve()
+        if not quad.is_file():
+            raise ValueError(f"四元组 manifest 不存在: {quad}")
+        if hashlib.sha256(quad.read_bytes()).hexdigest() != split["quad_manifest_sha256"]:
+            raise ValueError("四元组 manifest 已变更，需重新分组和归一化")
+        if mode == "overwrite" and not str(values.get("init_checkpoint", "")).strip():
+            raise ValueError("新实验必须填写共同的 18000 初始化权重")
+        stage2_args = (f"--counterfactual-manifest={quad}",)
     wandb_mode = str(values.get("wandb_mode", "offline"))
     if wandb_mode not in {"offline", "online", "disabled"}:
         raise ValueError("W&B 模式只能是 offline、online 或 disabled")
@@ -252,11 +274,30 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
             f"--{mode}",
             *_validation_arguments(values),
             *_selection_arguments(values),
+            *stage2_args,
         ),
         cwd=root,
         env=env,
         total_units=steps,
     )
+
+
+def _require_stage2_split(values):
+    from openpi.training.validation_split import load_split
+
+    raw = str(values.get("validation_manifest", "")).strip()
+    if not raw:
+        raise ValueError("请先用第二阶段四元组 manifest 生成并启用分组验证清单")
+    path = pathlib.Path(raw).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"第二阶段验证清单不存在: {path}")
+    try:
+        split = load_split(path)
+    except (OSError, KeyError, TypeError) as error:
+        raise ValueError(f"无效的第二阶段验证清单: {path}") from error
+    if split.get("grouping") != "bpx_counterfactual_quads" or not split.get("quad_manifest_sha256"):
+        raise ValueError("此清单不是第二阶段的四元组划分")
+    return split
 
 
 def _validation_arguments(values, *, normalize=False):
@@ -332,7 +373,16 @@ def build_validation_split(project_root: pathlib.Path, values: Mapping[str, obje
     argv = [sys.executable, "-m", "openpi.training.validation_split", "--dataset-root", str(dataset),
             "--output", str(output), "--fraction", str(fraction)]
     source = str(values.get("source_manifest", "")).strip()
-    if source:
+    quad = str(values.get("counterfactual_manifest", "")).strip()
+    if quad:
+        if source or values.get("independent_episodes"):
+            raise ValueError("四元组划分不能同时使用旧版划分选项")
+        path = pathlib.Path(quad).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"四元组 manifest 不存在: {path}")
+        argv = [sys.executable, "-m", "openpi.training.bpx_counterfactual", "--dataset-root", str(dataset),
+                "--output", str(output), "--fraction", str(fraction), "--manifest", str(path)]
+    elif source:
         path = pathlib.Path(source).expanduser().resolve()
         if not path.is_file():
             raise ValueError(f"源转换 manifest 不存在: {path}")

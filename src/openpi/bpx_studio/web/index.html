@@ -73,11 +73,21 @@
           <label>评估去噪步数<input id="selectionDenoise" type="number" value="10" min="1" max="100" /><small>只影响评估计算量，不改变训练损失。</small></label>
           <label class="wide">新一轮微调的初始化 Checkpoint（可选）<input id="initCheckpoint" placeholder="完整 checkpoint 目录或 recommended.json" /><small>仅载入权重，优化器与 step 重新开始。使用新实验名，不能同时选 resume。</small></label>
         </div></details>
+        <div class="grid three">
+          <label class="wide">训练流程<select id="trainingRecipe">
+            <option value="">原有训练流程</option>
+            <option value="pi05_bpx_cf_naive_full">第 1 组 · 原始 CFM / 全量微调</option>
+            <option value="pi05_bpx_cf_policy_cfg">第 2 组 · 语言 dropout 15% / 推理 CFG</option>
+            <option value="pi05_bpx_cf_partial_ft">第 3 组 · 冻结 VLM / 全训动作专家</option>
+            <option value="pi05_bpx_cf_ours">第 4 组 · 四元组 CCFA / CFM + NC-DFM + Attention</option>
+          </select><small>切换只填表，不启动任务；第二阶段使用 GPU 0–3、全局 BS 4、FSDP 4。</small></label>
+          <label class="wide" id="quadManifestField" hidden>四元组 Manifest<input id="quadManifest" /><small>按角色映射 episode、阶段帧区间和已复核注意力边。四组共享该文件、验证划分和归一化。</small></label>
+        </div>
         <details class="validation-setup" open><summary>训练 / 验证对比与过拟合观察</summary><p>新实验建议先生成完整 episode 分组划分，再重新计算训练部分的归一化。已有模型看过的数据不能充当独立验证集。验证只做前向计算，不自动停训。</p><div class="grid three">
           <label class="wide">划分清单输出<input id="validationOutput" /><small>生成后不可覆盖；训练与归一化使用同一份清单。</small></label>
           <label>验证分组比例<input id="validationFraction" type="number" min="0.01" max="0.49" step="0.01" value="0.1" /></label>
-          <label class="wide">源转换 manifest（增强数据必须填写）<input id="validationSource" placeholder="例如 …/bpx_pi05_multitask_v2/manifests/multitask_v2.json" /></label>
-          <label>数据来源<select id="validationGrouping"><option value="manifest">按源 manifest 绑定增强副本</option><option value="independent">确认没有增强/重复示教，每条独立</option></select></label>
+          <label class="wide" id="validationSourceField">源转换 manifest（增强数据必须填写）<input id="validationSource" placeholder="例如 …/bpx_pi05_multitask_v2/manifests/multitask_v2.json" /></label>
+          <label id="validationGroupingField">数据来源<select id="validationGrouping"><option value="manifest">按源 manifest 绑定增强副本</option><option value="independent">确认没有增强/重复示教，每条独立</option></select></label>
         </div><button id="createValidationSplit">生成分组验证清单</button><div class="grid three">
           <label class="wide">启用的划分清单<input id="validationManifest" placeholder="留空保持旧实验行为；生成后填入完整路径" /><small>影响训练数据选择和统计路径；已有实验续训必须保持不变。</small></label>
           <label>验证间隔 steps<input id="validationInterval" type="number" value="1000" min="100" step="100" /></label>
@@ -95,7 +105,7 @@
 
       <section class="monitor"><article class="card jobs"><div class="title"><h2>任务记录</h2><button id="refreshJobs">刷新</button></div><div id="jobList">暂无任务</div></article><article class="card details"><div class="title"><div><small id="selectedKind">NO JOB</small><h2 id="selectedTitle">选择任务查看详情</h2></div><button id="cancelJob" class="danger" hidden>终止任务</button></div><div class="progress-line"><span id="progressText">0 / 0</span><strong id="progressPercent">0%</strong></div><progress id="progressBar" max="100" value="0"></progress><div class="metrics"><div>LOSS<strong id="metricLoss">—</strong></div><div>GRAD NORM<strong id="metricGrad">—</strong></div><div>LEARNING RATE<strong id="metricLr">—</strong></div><div>STATUS<strong id="metricStatus">—</strong></div></div>
         <div class="validation-metrics"><div>训练参考 loss（eval）<strong id="metricTrainEval">—</strong></div><div>验证 loss<strong id="metricValidation">—</strong></div><div>验证 − 训练<strong id="metricGap">—</strong></div><div>最佳验证 step<strong id="metricBestStep">—</strong></div></div>
-        <p id="overfitHint" class="config-note">等待独立验证指标</p><div class="chart-toolbar"><label>训练曲线<select id="lossView"><option value="trend">稳健去毛刺趋势（Hampel + EMA）</option><option value="raw">原始训练 loss（保留全部峰值）</option></select></label><span id="lossPeakCount"></span></div>
+        <p id="overfitHint" class="config-note">等待独立验证指标</p><p id="stage2Metrics" class="config-note" hidden></p><div class="chart-toolbar"><label>训练曲线<select id="lossView"><option value="trend">稳健去毛刺趋势（Hampel + EMA）</option><option value="raw">原始训练 loss（保留全部峰值）</option></select></label><span id="lossPeakCount"></span></div>
         <div class="charts"><svg id="lossChart" viewBox="0 0 600 170"></svg><svg id="normChart" viewBox="0 0 600 170"></svg></div><h3>训练参考 / 验证 loss（同一 eval 模式，原始值）</h3><svg id="validationChart" viewBox="0 0 600 230"></svg><details><summary>受控命令与环境</summary><pre id="commandText">—</pre></details><pre id="jobLog" class="log">任务日志将在这里显示。</pre></article></section>
       <section class="card" id="selectionResults" hidden><div class="section-title"><h2>多指标选模结果</h2><span id="selectionStatus">等待评估</span></div><p id="selectionReason"></p><p>推荐 Checkpoint：<code id="selectionPath">—</code></p><pre id="selectionWarnings"></pre><button id="useSelectedInit">将推荐权重填入下一轮微调</button><p>该结果不同于“Validation Loss 最低 step”。离线指标不能替代真机成功率或独立 VLM 基准。</p><img id="selectionPlot" alt="固定评估集上的动作质量与语言响应趋势" style="max-width:100%;height:auto" hidden /></section>
     </main><datalist id="bpxConfigNames"></datalist><div id="toast"></div><script src="/static/app.js"></script>

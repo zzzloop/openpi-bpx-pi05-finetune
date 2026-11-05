@@ -146,6 +146,7 @@ def preprocess_observation(
     observation: Observation,
     *,
     train: bool = False,
+    shared_augmentation: bool = False,
     image_keys: Sequence[str] = IMAGE_KEYS,
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
 ) -> Observation:
@@ -180,8 +181,12 @@ def preprocess_observation(
             transforms += [
                 augmax.ColorJitter(brightness=0.3, contrast=0.4, saturation=0.5),
             ]
-            sub_rngs = jax.random.split(rng, image.shape[0])
-            image = jax.vmap(augmax.Chain(*transforms))(sub_rngs, image)
+            augment = augmax.Chain(*transforms)
+            if shared_augmentation:
+                image = jax.vmap(augment, in_axes=(None, 0))(rng, image)
+            else:
+                sub_rngs = jax.random.split(rng, image.shape[0])
+                image = jax.vmap(augment)(sub_rngs, image)
 
             # Back to [-1, 1].
             image = image * 2.0 - 1.0

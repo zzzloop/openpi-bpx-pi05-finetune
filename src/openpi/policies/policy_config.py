@@ -10,6 +10,7 @@ import openpi.policies.policy as _policy
 import openpi.shared.download as download
 from openpi.training import checkpoints as _checkpoints
 from openpi.training import config as _config
+from openpi.training import bpx_counterfactual as _bpx_cf
 import openpi.transforms as transforms
 
 
@@ -56,6 +57,15 @@ def create_trained_policy(
     else:
         model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
+    model_inputs = data_config.model_transforms.inputs
+    if _bpx_cf.CONFIGS.get(train_config.name) == "policy_cfg":
+        if is_pytorch:
+            raise ValueError("The BPX CFG policy supports the JAX checkpoint only")
+        from openpi.training.bpx_stage2_loss import CFG_MIN_TIME, DEFAULT_CFG_SCALE
+        from openpi.training.bpx_stage2_transforms import extra_tokens
+
+        model_inputs = extra_tokens(model_inputs, "policy_cfg")
+        sample_kwargs = {"cfg_scale": DEFAULT_CFG_SCALE, "cfg_min_time": CFG_MIN_TIME, **(sample_kwargs or {})}
     if norm_stats is None:
         # We are loading the norm stats from the checkpoint instead of the config assets dir to make sure
         # that the policy is using the same normalization stats as the original training process.
@@ -79,7 +89,7 @@ def create_trained_policy(
             transforms.InjectDefaultPrompt(default_prompt),
             *data_config.data_transforms.inputs,
             transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
-            *data_config.model_transforms.inputs,
+            *model_inputs,
         ],
         output_transforms=[
             *data_config.model_transforms.outputs,

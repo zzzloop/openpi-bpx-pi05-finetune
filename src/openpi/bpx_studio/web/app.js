@@ -10,7 +10,29 @@ const stored = [
   "validationManifest", "validationOutput", "validationSource", "validationGrouping", "validationFraction",
   "validationInterval", "validationBatches", "lossView",
   "probeOutput", "probeCaseSpec", "probeCases", "selectionSuite", "selectionKeep", "selectionDenoise", "initCheckpoint",
+  "quadManifest",
 ];
+const stage2FormFields = [
+  "trainConfig", "normConfig", "expName", "cudaDevices", "batchSize", "fsdpDevices", "trainSteps", "saveInterval",
+  "trainMode", "initCheckpoint", "validationOutput", "validationManifest", "selectionSuite", "probeOutput",
+  "probeCaseSpec", "checkpointLimit",
+];
+let studioConfig = {};
+let profileRequest = 0;
+
+function isStage2(configName = value("trainConfig")) {
+  return Object.hasOwn(studioConfig.stage2_configs || {}, configName);
+}
+
+function renderTrainingRecipe() {
+  const stage2 = isStage2();
+  $("trainingRecipe").value = stage2 ? value("trainConfig") : "";
+  $("quadManifestField").style.display = stage2 ? "flex" : "none";
+  $("quadManifestField").hidden = !stage2;
+  $("validationSourceField").style.display = stage2 ? "none" : "";
+  $("validationGroupingField").style.display = stage2 ? "none" : "";
+  $("createValidationSplit").textContent = stage2 ? "按四元组生成验证清单" : "生成分组验证清单";
+}
 
 let selectedJob = null;
 let checkpointRecords = [];
@@ -210,6 +232,7 @@ function renderConfigError(error) {
 }
 
 async function loadConfigProfile() {
+  const request = ++profileRequest;
   const configName = value("normConfig");
   if (!configName) return renderConfigError(new Error("Config name 为空"));
   const query = new URLSearchParams({
@@ -218,9 +241,10 @@ async function loadConfigProfile() {
     validation_manifest: value("validationManifest"),
   });
   try {
-    renderConfigProfile(await api(`/api/config-profile?${query}`));
+    const profile = await api(`/api/config-profile?${query}`);
+    if (request === profileRequest) renderConfigProfile(profile);
   } catch (error) {
-    renderConfigError(error);
+    if (request === profileRequest) renderConfigError(error);
   }
 }
 
@@ -229,6 +253,17 @@ async function confirmDataBinding(action) {
   if (!currentConfigProfile.stats_paths_match) {
     toast("归一化写入与训练加载路径不一致，操作已阻止", true);
     return false;
+  }
+  if (isStage2(currentConfigProfile.config_name)) {
+    if (!currentConfigProfile.dataset_exists || !value("validationManifest")) {
+      toast("先导入第二阶段数据，再按四元组生成并启用验证清单", true);
+      return false;
+    }
+    if (action === "启动训练" && !currentConfigProfile.computed_stats_exists) {
+      toast("请先计算第二阶段共用的训练集归一化", true);
+      return false;
+    }
+    return confirm(`第二阶段数据：\n${currentConfigProfile.dataset_path}\n\n划分：\n${value("validationManifest")}\n\n确认${action}？`);
   }
   const recovered = currentConfigProfile.feedback_recovery;
   if (recovered) {
@@ -504,16 +539,18 @@ $("startTrain").onclick = async () => {
     validation_batches: num("validationBatches"),
     selection_suite: value("selectionSuite"), selection_keep: num("selectionKeep"),
     selection_denoise_steps: num("selectionDenoise"), init_checkpoint: value("initCheckpoint"),
+    ...(isStage2() ? {counterfactual_manifest: value("quadManifest")} : {}),
   });
 };
 $("createProbeSuite").onclick = async () => {
   try {
     const output = value("probeOutput");
+    const configName = value("trainConfig");
     const job = await api("/api/jobs/selection-suite", {method: "POST", body: JSON.stringify({
-      ...dataEnvironment(), config_name: value("trainConfig"), output_dir: output,
+      ...dataEnvironment(), config_name: configName, output_dir: output,
       case_spec: value("probeCaseSpec"), max_cases: num("probeCases"),
     })});
-    pendingProbe = {id: job.id, output}; selectedJob = job.id;
+    pendingProbe = {id: job.id, output, configName}; selectedJob = job.id;
     toast("正在准备固定选模样本；未经人工复核的指令对仅供诊断");
     await refreshJobs();
   } catch (error) { toast(error.message, true); }
@@ -527,12 +564,15 @@ $("useSelectedInit").onclick = () => {
 $("createValidationSplit").onclick = async () => {
   try {
     const output = value("validationOutput");
+    const stage2 = isStage2();
+    if (stage2 && !value("quadManifest")) throw new Error("请先填写四元组 Manifest");
     const result = await api("/api/jobs/validation-split", {method: "POST", body: JSON.stringify({
       dataset_root: value("trainDatasetSource"), output_path: output,
-      source_manifest: value("validationGrouping") === "manifest" ? value("validationSource") : "",
-      independent_episodes: value("validationGrouping") === "independent", fraction: num("validationFraction"),
+      source_manifest: !stage2 && value("validationGrouping") === "manifest" ? value("validationSource") : "",
+      independent_episodes: !stage2 && value("validationGrouping") === "independent", fraction: num("validationFraction"),
+      ...(stage2 ? {counterfactual_manifest: value("quadManifest")} : {}),
     })});
-    pendingValidation = {id: result.id, output};
+    pendingValidation = {id: result.id, output, stage2};
     selectedJob = result.id;
     toast("正在分组划分；完成后自动填入启用清单，请重新计算归一化");
     await refreshJobs();
@@ -675,6 +715,12 @@ async function show(job) {
   $("progressPercent").textContent = `${Number(progress.percent || 0).toFixed(1)}%`;
   $("progressBar").value = progress.percent || 0;
   $("metricLoss").textContent = fmt(job.metrics?.loss);
+  const ccfa = Number.isFinite(job.metrics?.nc_dfm_loss);
+  const cfg = Number.isFinite(job.metrics?.language_drop_rate);
+  $("stage2Metrics").hidden = !ccfa && !cfg;
+  $("stage2Metrics").textContent = ccfa
+    ? `CCFA：CFM ${fmt(job.metrics.cfm_loss)} · NC-DFM ${fmt(job.metrics.nc_dfm_loss)} · Attention semantic ${fmt(job.metrics.attn_sem_loss)} · Attention swap ${fmt(job.metrics.attn_swap_loss)}。上方训练 Loss 是加权总损失；下方独立验证对比仍用同一 CFM 口径。`
+    : cfg ? `CFG：最近记录区间实际语言 dropout ${(100 * job.metrics.language_drop_rate).toFixed(1)}%；训练目标概率 15%，验证 Loss 使用完整任务文本。` : "";
   $("metricGrad").textContent = fmt(job.metrics?.grad_norm);
   $("metricLr").textContent = fmt(job.metrics?.learning_rate);
   $("metricStatus").textContent = job.status;
@@ -724,15 +770,24 @@ async function refreshJobs() {
   try {
     const jobs = await api("/api/jobs");
     if (pendingProbe && jobs.some((job) => job.id === pendingProbe.id && job.status === "succeeded")) {
-      $("selectionSuite").value = `${pendingProbe.output.replace(/\/$/, "")}/suite.json`;
-      pendingProbe = null; save(); toast("固定评估集已准备；请确认指令对是否已人工复核");
+      if (pendingProbe.configName === value("trainConfig")) {
+        $("selectionSuite").value = `${pendingProbe.output.replace(/\/$/, "")}/suite.json`;
+        save(); toast("固定评估集已准备；请确认指令对是否已人工复核");
+      } else {
+        toast(`固定评估集已准备：${pendingProbe.output}；当前 Config 不同，未自动填入`);
+      }
+      pendingProbe = null;
     }
     if (pendingValidation) {
       const completed = jobs.find((job) => job.id === pendingValidation.id && job.status === 'succeeded');
       if (completed) {
-        $("validationManifest").value = pendingValidation.output;
+        if (pendingValidation.stage2 === isStage2()) {
+          $("validationManifest").value = pendingValidation.output;
+          $("validationManifest").dispatchEvent(new Event('change'));
+        } else {
+          toast(`验证清单已生成：${pendingValidation.output}；当前流程不同，未自动填入`);
+        }
         pendingValidation = null;
-        $("validationManifest").dispatchEvent(new Event('change'));
       }
     }
     $("jobList").innerHTML = jobs.length
@@ -812,6 +867,7 @@ async function synchronizeConfig(event) {
   ["normConfig", "trainConfig"].forEach((id) => {
     if ($(id) !== event.target) $(id).value = configName;
   });
+  renderTrainingRecipe();
   try {
     $("expName").value = (await api(`/api/next-experiment?config_name=${encodeURIComponent(configName)}&checkpoint_root=${encodeURIComponent(value("checkpointRoot"))}`)).experiment_name;
   } catch (error) {
@@ -820,6 +876,49 @@ async function synchronizeConfig(event) {
   await loadConfigProfile();
   save();
 }
+
+$("trainingRecipe").addEventListener("change", async () => {
+  const target = value("trainingRecipe");
+  const previous = value("trainConfig");
+  if (!isStage2(previous) && target) {
+    localStorage.setItem("bpx-legacy-train-form", JSON.stringify(Object.fromEntries(
+      stage2FormFields.map((id) => [id, $(id).value])
+    )));
+    $("validationManifest").value = "";
+    $("validationOutput").value = `${studioConfig.stage2_report_root}/validation_split.json`;
+    $("probeCaseSpec").value = "";
+  }
+  if (target) {
+    const values = {
+      cudaDevices: "0,1,2,3", batchSize: "4", fsdpDevices: "4", trainSteps: "10000", saveInterval: "1000",
+      trainMode: "overwrite", selectionSuite: "", checkpointLimit: "3",
+      probeOutput: `${studioConfig.stage2_report_root}/${target}_suite`,
+      initCheckpoint: `${value("checkpointRoot").replace(/\/$/, "")}/${studioConfig.stage2_initial_checkpoint}`,
+    };
+    if (!value("quadManifest")) $("quadManifest").value = `${studioConfig.stage2_report_root}/quadruples.json`;
+    if (!isStage2(previous)) {
+      Object.entries(values).forEach(([id, val]) => { $(id).value = val; });
+    } else {
+      ["selectionSuite", "probeOutput", "trainMode", "initCheckpoint"].forEach((id) => { $(id).value = values[id]; });
+    }
+    $("trainConfig").value = target;
+    await synchronizeConfig({target: $("trainConfig")});
+  } else {
+    const legacy = JSON.parse(localStorage.getItem("bpx-legacy-train-form") || "null");
+    if (legacy) Object.entries(legacy).forEach(([id, val]) => { $(id).value = val; });
+    else {
+      $("trainConfig").value = $("normConfig").value = studioConfig.default_config_name;
+      Object.entries({expName: studioConfig.default_experiment_name, cudaDevices: "2,3", batchSize: "2",
+        fsdpDevices: "2", trainSteps: "200000", saveInterval: "5000", trainMode: "overwrite",
+        validationManifest: "", selectionSuite: "", initCheckpoint: "", probeCaseSpec: "",
+        validationOutput: studioConfig.validation_split, probeOutput: studioConfig.selection_suite_output,
+      }).forEach(([id, val]) => { $(id).value = val || ""; });
+    }
+    renderTrainingRecipe();
+    await loadConfigProfile();
+    save();
+  }
+});
 
 ["normConfig", "trainConfig"].forEach((id) => $(id).addEventListener("change", synchronizeConfig));
 $("serveCheckpoint").addEventListener("change", applyCheckpointConfig);
@@ -847,6 +946,7 @@ async function init() {
   });
   try {
     const config = await api("/api/config");
+    studioConfig = config;
     const defaults = {
       openpiRoot: config.default_openpi_root,
       hfLerobotHome: config.hf_lerobot_home,
@@ -875,6 +975,7 @@ async function init() {
       if ($(id) && !$(id).value) $(id).value = val;
     });
     $("bpxConfigNames").innerHTML = config.known_config_names.map((name) => `<option value="${escapeHtml(name)}"></option>`).join("");
+    renderTrainingRecipe();
     await Promise.allSettled([
       loadCheckpoints(localStorage.getItem("bpx-serveCheckpoint")),
       loadConfigProfile(),

@@ -21,6 +21,7 @@ const {chromium} = require('playwright');
     }, display: {loss_trend: .03, loss_outlier: index === 1}}));
     let generated = false;
     let splitRequest;
+    const stage2Config = 'pi05_bpx_cf_ours';
     const exportRequests = [];
     const profileQueries = [];
     await page.route('http://studio.test/**', async route => {
@@ -31,6 +32,9 @@ const {chromium} = require('playwright');
         default_experiment_name: 'test_v001', known_config_names: [], hf_lerobot_home: '/scratch/demo/lerobot',
         clean_dataset: dataset, raw_dataset: dataset+'_raw', checkpoint_root: '/scratch/demo/checkpoints',
         validation_split: split,
+        stage2_configs: {[stage2Config]: 'ccfa_ours', pi05_bpx_cf_naive_full: 'naive_full'},
+        stage2_report_root: '/scratch/demo/reports/cf',
+        stage2_initial_checkpoint: 'stage1/selected_checkpoints/18000',
       };
       else if (url.pathname === '/api/config-profile') {
         profileQueries.push(url.searchParams.get('validation_manifest'));
@@ -73,6 +77,24 @@ const {chromium} = require('playwright');
     assert.equal(splitRequest.fraction, .1);
     await page.waitForTimeout(100);
     assert(profileQueries.includes(split));
+    await page.locator('#cudaDevices').fill('2,3');
+    await page.locator('#trainingRecipe').selectOption(stage2Config);
+    await page.waitForFunction(() => document.querySelector('#cudaDevices').value === '0,1,2,3');
+    assert.equal(await page.locator('#batchSize').inputValue(), '4');
+    assert.equal(await page.locator('#fsdpDevices').inputValue(), '4');
+    assert.equal(await page.locator('#normConfig').inputValue(), stage2Config);
+    assert.equal(await page.locator('#initCheckpoint').inputValue(), '/scratch/demo/checkpoints/stage1/selected_checkpoints/18000');
+    assert.equal(await page.locator('#validationManifest').inputValue(), '');
+    await page.locator('#createValidationSplit').click();
+    await page.waitForFunction(() => document.querySelector('#validationManifest').value.endsWith('/cf/validation_split.json'));
+    assert.equal(splitRequest.counterfactual_manifest, '/scratch/demo/reports/cf/quadruples.json');
+    assert.equal(splitRequest.source_manifest, '');
+    await page.locator('#trainingRecipe').selectOption('pi05_bpx_cf_naive_full');
+    assert.equal(await page.locator('#validationManifest').inputValue(), '/scratch/demo/reports/cf/validation_split.json');
+    await page.locator('#trainingRecipe').selectOption('');
+    assert.equal(await page.locator('#cudaDevices').inputValue(), '2,3');
+    assert.equal(await page.locator('#batchSize').inputValue(), '2');
+    assert.equal(await page.locator('#validationManifest').inputValue(), split);
     await page.locator('[data-tab="export"]').click();
     await page.locator('#exportSource').fill(dataset);
     await page.locator('#exportOutput').fill('/scratch/demo/exports/check_one');

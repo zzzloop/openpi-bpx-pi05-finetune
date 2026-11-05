@@ -80,6 +80,8 @@ class Policy(BasePolicy):
 
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
+        if not self._is_pytorch_model and "null_prompt" in inputs:
+            sample_kwargs.update(null_prompt=inputs["null_prompt"], null_prompt_mask=inputs["null_prompt_mask"])
         if noise is not None:
             noise = torch.from_numpy(noise).to(self._pytorch_device) if self._is_pytorch_model else jnp.asarray(noise)
 
