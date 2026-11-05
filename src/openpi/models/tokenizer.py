@@ -51,13 +51,13 @@ class PaligemmaTokenizer:
         """Locate actual task text (not state/scaffolding) in the existing Pi05 tokenization."""
         text = prompt.strip().replace("_", " ").replace("\n", " ")
         if not text or not text.isascii():
-            raise ValueError("QuadDiff-FM attention requires a nonempty ASCII English task prompt")
+            raise ValueError("QDFM attention requires a nonempty ASCII English task prompt")
         state_str = " ".join(map(str, np.digitize(state, bins=np.linspace(-1, 1, 257)[:-1]) - 1))
         prefix = "Task: "
         full_prompt = f"{prefix}{text}, State: {state_str};\nAction: "
         pieces = self._tokenizer.encode(full_prompt, out_type="immutable_proto").pieces
         if len(pieces) + 1 > self._max_len:
-            raise ValueError("QuadDiff-FM prompt/state truncated; shorten the task prompt")
+            raise ValueError("QDFM prompt/state truncated; shorten the task prompt")
         mask = np.zeros(self._max_len, dtype=bool)
         # add_bos=True in tokenize() prepends one token. Permit pieces with a leading space,
         # but not pieces that contain any characters from the 'Task:' or ', State:' scaffolding.
@@ -67,7 +67,7 @@ class PaligemmaTokenizer:
                 begin += 1
             mask[index] = len(prefix) <= begin < piece.end <= len(prefix) + len(text)
         if not mask.any():
-            raise ValueError("No usable QuadDiff-FM language tokens in task prompt")
+            raise ValueError("No usable QDFM language tokens in task prompt")
         return mask
 
 

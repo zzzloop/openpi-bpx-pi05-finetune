@@ -79,7 +79,7 @@
             <option value="pi05_bpx_cf_naive_full">第 1 组 · 原始 CFM / 全量微调</option>
             <option value="pi05_bpx_cf_policy_cfg">第 2 组 · 语言 dropout 15% / 推理 CFG</option>
             <option value="pi05_bpx_cf_partial_ft">第 3 组 · 冻结 VLM / 全训动作专家</option>
-            <option value="pi05_bpx_cf_ours">第 4 组 · QuadDiff-FM / 反事实四元组差分流匹配</option>
+            <option value="pi05_bpx_cf_ours">第 4 组 · QDFM / 反事实四元组差分流匹配</option>
           </select><small>切换只填表，不启动任务；第二阶段使用 GPU 0–3、全局 BS 4、FSDP 4。</small></label>
           <label class="wide" id="quadManifestField" hidden>四元组 Manifest<input id="quadManifest" /><small>按角色映射 episode、阶段帧区间和已复核注意力边。四组共享该文件、验证划分和归一化。</small></label>
         </div>

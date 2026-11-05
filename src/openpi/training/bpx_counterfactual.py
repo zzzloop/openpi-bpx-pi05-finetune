@@ -11,7 +11,7 @@ import random
 from openpi.training import validation_split
 
 QUAD_DIFF_CONFIG = "pi05_bpx_cf_ours"
-QUAD_DIFF_NAME = "QuadDiff-FM"
+QUAD_DIFF_NAME = "QDFM"
 
 CONFIGS = {
     "pi05_bpx_cf_naive_full": "naive_full",

@@ -274,7 +274,7 @@ def test_monitor_compares_raw_eval_losses_and_preserves_all_peaks(tmp_path):
     assert all(p.is_file() for p in paths)
 
 
-@pytest.mark.parametrize("composite_title", [None, "QuadDiff-FM total loss"])
+@pytest.mark.parametrize("composite_title", [None, "QDFM total loss"])
 def test_monitor_labels_composite_objective_without_mislabelling_cfm(tmp_path, monkeypatch, composite_title):
     from openpi.training.monitoring import TrainingMonitor
 
