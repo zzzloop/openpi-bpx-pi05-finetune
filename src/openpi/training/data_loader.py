@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+import dataclasses
 import logging
 import multiprocessing
 import os
@@ -397,7 +398,11 @@ def _create_stage2_loader(config, data, sharding, num_batches):
         pathlib.Path(config.counterfactual_manifest), pathlib.Path(lerobot_dataset.HF_LEROBOT_HOME) / data.repo_id,
         pathlib.Path(config.validation_manifest), require_attention=mode == "ccfa_ours",
     )
-    sampler = _bpx_cf.QuadBatchSampler(quads, records, data.episode_indices, config.seed)
+    split = _validation_split.load_split(config.validation_manifest)
+    sampler = _bpx_cf.QuadBatchSampler(
+        quads, records, data.episode_indices, config.seed,
+        old_replay_episodes=split["old_replay_episodes"] if split["schema_version"] == 2 else None,
+    )
     dataset = create_torch_dataset(data, config.model.action_horizon, config.model)
     if mode in {"policy_cfg", "ccfa_ours"}:
         data = dataclasses.replace(data, model_transforms=dataclasses.replace(

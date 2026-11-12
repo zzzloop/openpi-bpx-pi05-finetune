@@ -97,14 +97,18 @@ def build_split(
 
 def load_split(path: str | pathlib.Path) -> dict:
     payload = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
-    if payload.get("schema_version") != 1:
+    version = payload.get("schema_version")
+    if version != 1 and not (version == 2 and payload.get("grouping") == "bpx_counterfactual_quads"):
         raise ValueError("Unsupported validation split schema")
     train, val, groups = payload["train_episodes"], payload["validation_episodes"], payload["groups"]
-    if (not train or not val or any(type(i) is not int for i in [*train, *val])
-            or sorted([*train, *val]) != list(range(len(groups)))):
+    excluded = payload["excluded_episodes"] if version == 2 else []
+    indices = [*train, *val, *excluded]
+    if (not train or not val or any(type(i) is not int for i in indices)
+            or sorted(indices) != list(range(len(groups)))):
         raise ValueError("Split must partition every episode exactly once")
-    if {groups[i] for i in train} & {groups[i] for i in val}:
-        raise ValueError("Train/validation source groups overlap")
+    group_sets = [{groups[i] for i in part} for part in (train, val, excluded)]
+    if any(a & b for i, a in enumerate(group_sets) for b in group_sets[i + 1:]):
+        raise ValueError("Train/validation/excluded source groups overlap")
     return payload
 
 
@@ -134,9 +138,14 @@ def select_data_config(config, data_config, split: str = "train"):
     from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
 
     payload = load_split(config.validation_manifest)
-    records, fingerprint = inventory(pathlib.Path(HF_LEROBOT_HOME) / data_config.repo_id)
+    root = pathlib.Path(HF_LEROBOT_HOME) / data_config.repo_id
+    records, fingerprint = inventory(root)
     if fingerprint != payload["metadata_sha256"] or len(records) != len(payload["groups"]):
         raise ValueError("Dataset metadata changed since split creation; do not resume with another dataset")
+    if payload["schema_version"] == 2:
+        provenance = (root / "meta/bpx_episode_provenance.jsonl").read_bytes()
+        if hashlib.sha256(provenance).hexdigest() != payload["provenance_sha256"]:
+            raise ValueError("Stage-2 provenance differs from this split; check the versioned LeRobot data root")
     indices = payload["validation_episodes" if split == "validation" else "train_episodes"]
     return dataclasses.replace(data_config, episode_indices=tuple(indices),
                                balance_by_task=data_config.balance_by_task and split == "train")

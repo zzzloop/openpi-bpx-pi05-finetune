@@ -153,7 +153,6 @@ def train_step(
     rng: at.KeyArrayLike,
     state: training_utils.TrainState,
     batch: tuple[_model.Observation, _model.Actions] | tuple[_model.Observation, _model.Actions, dict[str, at.Array]],
-    *,
     stage2_aligned: bool = False,
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
@@ -255,9 +254,12 @@ def _stage2_protocol(config, initial_source):
         raise ValueError("New Stage-2 runs must initialize from the common Stage-1 18000 checkpoint")
     if not config.resume and not config.stage2_smoke_test and config.checkpoint_dir.exists():
         raise FileExistsError("Stage-2 never overwrites an existing experiment; choose another name or resume")
-    if (config.batch_size != 4 or config.fsdp_devices != 4 or jax.process_count() != 1
-            or jax.device_count() != 4 or any(device.platform != "gpu" for device in jax.devices())):
-        raise ValueError("BPX Stage-2 requires one host, four GPU devices, global batch size 4, and FSDP=4")
+    devices = jax.devices()
+    if jax.process_count() != 1 or any(device.platform != "gpu" for device in devices):
+        raise ValueError("BPX Stage-2 requires one host and GPU devices")
+    _bpx_cf.validate_training_topology(
+        config.name, batch_size=config.batch_size, fsdp_devices=config.fsdp_devices, gpu_count=len(devices),
+    )
     if not getattr(config.model, "pi05", False) or (config.model.action_horizon, config.model.action_dim) != (30, 32):
         raise ValueError("BPX Stage-2 requires the Stage-1 Pi05 architecture (horizon 30, padded action dim 32)")
     if (config.log_interval < 1 or config.validation_interval < 1 or config.validation_batches < 1
@@ -272,7 +274,8 @@ def _stage2_protocol(config, initial_source):
         raise ValueError(f"Compute shared Stage-2 TRAIN-ONLY normalization first: {stats}")
     protocol = {
         "schema_version": 2, "method": mode, "repo_id": config.data.repo_id, "seed": config.seed,
-        "sampling_protocol": _bpx_cf.SAMPLING_PROTOCOL,
+        "fsdp_devices": config.fsdp_devices,
+        "sampling_protocol": _bpx_cf.sampling_protocol(quad_path),
         "quad_sha256": hashlib.sha256(quad_path.read_bytes()).hexdigest(),
         "split_digest": _validation_split.split_digest(split_path),
         "norm_sha256": hashlib.sha256(stats.read_bytes()).hexdigest(),
@@ -283,7 +286,10 @@ def _stage2_protocol(config, initial_source):
     path = config.checkpoint_dir / "monitoring/stage2_protocol.json"
     if config.resume:
         previous = json.loads(path.read_text(encoding="utf-8"))
-        if previous.get("sampling_protocol") != _bpx_cf.SAMPLING_PROTOCOL:
+        # Existing runs could only use FSDP=4 before two-GPU support.
+        if previous.setdefault("fsdp_devices", 4) != config.fsdp_devices:
+            raise ValueError("Stage-2 resume requires the original FSDP device count")
+        if previous.get("sampling_protocol") != protocol["sampling_protocol"]:
             raise ValueError("Stage-2 sampler changed; start a new experiment from Stage-1 step 18000")
         protocol["initial_checkpoint"] = previous["initial_checkpoint"]
         if previous != protocol:
@@ -292,7 +298,9 @@ def _stage2_protocol(config, initial_source):
 
 
 def _compile_train_step(config, state_sharding, data_sharding, replicated_sharding):
-    stage2_options = {"static_argnames": ("stage2_aligned",)} if config.name in _bpx_cf.CONFIGS else {}
+    # With explicit in_shardings, JAX 0.5.3 rejects kwargs. After binding config,
+    # the phase flag is positional arg 3 and is not part of the sharded inputs.
+    stage2_options = {"static_argnums": (3,)} if config.name in _bpx_cf.CONFIGS else {}
     return jax.jit(
         functools.partial(train_step, config),
         in_shardings=(replicated_sharding, state_sharding, data_sharding),
@@ -303,8 +311,11 @@ def _compile_train_step(config, state_sharding, data_sharding, replicated_shardi
 
 
 def _run_stage2_smoke(config, init_rng, train_rng, mesh, data_sharding, replicated_sharding):
-    print("[BPX PREFLIGHT] Loading real dataset and initialization weights; no checkpoints or W&B writes.", flush=True)
-    loader = _data_loader.create_data_loader(config, sharding=data_sharding, shuffle=True, num_batches=2)
+    print(f"[BPX PREFLIGHT] GPUs={jax.device_count()}, global BS={config.batch_size}, FSDP={config.fsdp_devices}; "
+          "loading real data and weights without checkpoint or W&B writes.", flush=True)
+    protocol = _bpx_cf.sampling_protocol(pathlib.Path(config.counterfactual_manifest))
+    updates = 4 if protocol == _bpx_cf.REPLAY_PROTOCOL else 2
+    loader = _data_loader.create_data_loader(config, sharding=data_sharding, shuffle=True, num_batches=updates)
     state, state_sharding = init_train_state(config, init_rng, mesh, resume=False)
     jax.block_until_ready(state)
     if _bpx_cf.CONFIGS[config.name] == "partial_ft":
@@ -319,17 +330,17 @@ def _run_stage2_smoke(config, init_rng, train_rng, mesh, data_sharding, replicat
         print(f"[BPX PREFLIGHT] Frozen parameter leaves={len(frozen_paths)}; trainable={len(trainable_paths)}", flush=True)
     step_fn = _compile_train_step(config, state_sharding, data_sharding, replicated_sharding)
     for step, batch in enumerate(loader):
-        aligned = _bpx_cf.is_aligned_step(step)
+        aligned = _bpx_cf.is_aligned_step(step, protocol)
         print(f"[BPX PREFLIGHT] Compiling and executing {'aligned quad' if aligned else 'whole trajectory'} update", flush=True)
         with sharding.set_mesh(mesh):
-            state, info = step_fn(train_rng, state, batch, stage2_aligned=aligned)
+            state, info = step_fn(train_rng, state, batch, aligned)
         info = jax.device_get(info)
         if (not all(np.isfinite(x).all() for x in info.values()) or info["grad_norm"] <= 0
                 or info["update_norm"] <= 0 or not info.get("frozen_unchanged", True)):
             raise FloatingPointError(f"Stage-2 preflight step {step} failed: nonfinite/zero update or changed frozen parameters")
         print(f"Step {step + 1}: loss={info['loss']:.6g}, grad_norm={info['grad_norm']:.6g}, "
               f"update_norm={info['update_norm']:.6g}", flush=True)
-    if int(state.step) != 2:
+    if int(state.step) != updates:
         raise RuntimeError("Stage-2 preflight did not execute both update paths")
     if config.selection_suite:
         # Validate the optional suite binding and bundle before starting a long run.
@@ -344,7 +355,7 @@ def _run_stage2_smoke(config, init_rng, train_rng, mesh, data_sharding, replicat
         val_loss = float(check_eval(state.params, jax.random.key(config.validation_seed), validation))
     if not np.isfinite(val_loss):
         raise FloatingPointError("Stage-2 preflight held-out CFM is nonfinite")
-    print(f"BPX STAGE-2 PREFLIGHT PASS: two updates, heldout_cfm={val_loss:.6g}; no checkpoint saved", flush=True)
+    print(f"BPX STAGE-2 PREFLIGHT PASS: {updates} updates, heldout_cfm={val_loss:.6g}; no checkpoint saved", flush=True)
 
 
 def main(config: _config.TrainConfig):
@@ -402,7 +413,8 @@ def main(config: _config.TrainConfig):
             path.parent.mkdir(parents=True, exist_ok=True)
             _selection.atomic_json(path, protocol)
             shutil.copyfile(config.counterfactual_manifest, path.with_name("quadruples.json"))
-        logging.info("BPX Stage-2: %s; global batch=4, FSDP=4, init=%s", stage2, protocol["initial_checkpoint"])
+        logging.info("BPX Stage-2: %s; global batch=%d, FSDP=%d, init=%s",
+                     stage2, config.batch_size, config.fsdp_devices, protocol["initial_checkpoint"])
     ordinary_keep, _, archive_keep = _checkpoints.retention_budget(
         config.checkpoint_limit, config.keep_period, config.selection_keep if config.selection_suite else None,
     )
@@ -639,13 +651,14 @@ def main(config: _config.TrainConfig):
 
     last_trained_batch = batch
     last_completed_step = start_step-1
+    sampling_protocol = stage2_protocol[1]["sampling_protocol"] if stage2_protocol else None
     try:
         for step in pbar:
             last_trained_batch = batch
             with sharding.set_mesh(mesh):
                 if stage2:
                     train_state, info = ptrain_step(
-                        train_rng, train_state, batch, stage2_aligned=_bpx_cf.is_aligned_step(step))
+                        train_rng, train_state, batch, _bpx_cf.is_aligned_step(step, sampling_protocol))
                 else:
                     train_state, info = ptrain_step(train_rng, train_state, batch)
             last_completed_step = step

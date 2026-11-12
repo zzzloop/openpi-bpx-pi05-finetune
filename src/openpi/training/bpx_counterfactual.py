@@ -23,12 +23,22 @@ CONFIGS = {
 BASE_CONFIG = next(iter(CONFIGS))
 HORIZON = 30
 SAMPLING_PROTOCOL = "alternate_full_frame_permutation_and_aligned_quad_v2"
+REPLAY_PROTOCOL = "three_ordinary_one_quad_replay_15pct_v3"
 SEMANTIC_EDGES = ((0, 1), (2, 3))
 SPATIAL_EDGES = ((0, 2), (1, 3))
 SWAP_EDGES = ((0, 3), (1, 2))
 INITIAL_CHECKPOINT = (
     "pi05_bpx_full_low_mem_v1_base_estimated/bpx_v2_humanoid_bs2_v001_new/selected_checkpoints/18000"
 )
+
+
+def validate_training_topology(config_name: str, *, batch_size: int, fsdp_devices: int, gpu_count: int) -> None:
+    """Keep the four-sample batch contract independent of the number of GPUs."""
+    method = CONFIGS[config_name]
+    allowed_counts = (4,) if method == "ccfa_ours" else (2, 4)
+    if batch_size != 4 or gpu_count not in allowed_counts or fsdp_devices != gpu_count:
+        allowed = "four" if method == "ccfa_ours" else "two or four"
+        raise ValueError(f"BPX Stage-2 {method} requires global BS=4, {allowed} GPUs, and FSDP equal to GPU count")
 
 
 @dataclass(frozen=True)
@@ -53,10 +63,87 @@ def _attention_mask(pairs, valid_edges, group_id):
     return tuple(edge in edges for edge in valid_edges)
 
 
+def _protocol(payload):
+    if payload.get("schema_version") == 1 and "sampling_protocol" not in payload:
+        return SAMPLING_PROTOCOL
+    if payload.get("schema_version") == 2 and payload.get("sampling_protocol") == REPLAY_PROTOCOL:
+        return REPLAY_PROTOCOL
+    raise ValueError("Unsupported Stage-2 quadruple manifest or sampling protocol")
+
+
+def sampling_protocol(path: Path) -> str:
+    return _protocol(json.loads(path.read_bytes()))
+
+
+def _replay_provenance(payload, root, records):
+    raw = (root / "meta/bpx_episode_provenance.jsonl").read_bytes()
+    if payload.get("provenance_sha256") != hashlib.sha256(raw).hexdigest():
+        raise ValueError("Stage-2 replay provenance has changed")
+    rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    if [row["episode_index"] for row in rows] != list(range(len(records))):
+        raise ValueError("Stage-2 replay provenance must cover every episode in dataset order")
+    source_ids = {row["source_episode"] for row in rows}
+    if len(source_ids) != len(rows) or any(
+        row["task"] != rec["tasks"][0] or row["frames"] != rec["length"]
+        or type(row["estimated_coordinates"]) is not int or row["estimated_coordinates"] < 0
+        for row, rec in zip(rows, records, strict=True)
+    ):
+        raise ValueError("Stage-2 replay provenance disagrees with dataset episodes")
+    return rows
+
+
+def _replay_split(dataset_root, payload, quads, records, fingerprint, digest):
+    def ids(key):
+        values = payload[key]
+        if (not isinstance(values, list) or any(type(i) is not int or not 0 <= i < len(records) for i in values)
+                or len(set(values)) != len(values)):
+            raise ValueError(f"Invalid Stage-2 replay {key}")
+        return set(values)
+
+    old, excluded = ids("old_replay_episodes"), ids("excluded_episodes")
+    provenance = _replay_provenance(payload, dataset_root, records)
+    old_base = {row["episode_index"] for row in provenance if row["old_base_episode"] is not None}
+    heldout = payload["heldout_split_groups"]
+    all_groups = {q.split_group for q in quads}
+    if (not isinstance(heldout, list) or not heldout or any(not isinstance(g, str) for g in heldout)
+            or not set(heldout) < all_groups or len(set(heldout)) != len(heldout)):
+        raise ValueError("Stage-2 replay requires a fixed, nonempty held-out subset of complete groups")
+    quad_ids = {i for q in quads for i in q.episodes}
+    if not old or old & excluded or old != old_base - excluded or quad_ids & (old | excluded | old_base):
+        raise ValueError("Old replay, excluded episodes and aligned quads must be disjoint and provenance-bound")
+    heldout = set(heldout)
+    val = sorted(i for q in quads if q.split_group in heldout for i in q.episodes)
+    train = sorted(set(range(len(records))) - set(val) - excluded)
+    if not set(train) - old:
+        raise ValueError("Stage-2 replay requires both new and old ordinary training data")
+    groups = [f"ordinary:{i}" for i in range(len(records))]
+    for q in quads:
+        for i in q.episodes:
+            groups[i] = q.split_group
+    return {
+        "schema_version": 2, "metadata_sha256": fingerprint, "dataset_root": str(dataset_root.resolve()),
+        "grouping": "bpx_counterfactual_quads", "quad_manifest_sha256": digest,
+        "provenance_sha256": payload["provenance_sha256"],
+        "sampling_protocol": REPLAY_PROTOCOL, "validation_scope": "heldout_trajectories_in_known_layouts",
+        "groups": groups, "train_episodes": train, "validation_episodes": val,
+        "excluded_episodes": sorted(excluded), "old_replay_episodes": sorted(old),
+        "train_frames": sum(records[i]["length"] for i in train),
+        "validation_frames": sum(records[i]["length"] for i in val),
+        "heldout_quads": [
+            {"family": q.family, "group_id": q.group_id, "episodes": list(q.episodes),
+             "anchor_frames": [lo for lo, _ in q.windows]}
+            for q in quads if q.split_group in heldout
+        ],
+    }
+
+
 def load_quads(path: Path, dataset_root: Path):
-    """Validate roles, real (unpadded) action windows, and exact dataset coverage."""
+    """Validate roles and unpadded action windows, with measured-only aligned examples."""
     records, fingerprint = validation_split.inventory(dataset_root)
-    if (dataset_root / "meta/bpx_feedback_recovery.json").exists():
+    raw = path.read_bytes()
+    payload = json.loads(raw)
+    replay = _protocol(payload) == REPLAY_PROTOCOL
+    if not replay and (dataset_root / "meta/bpx_feedback_recovery.json").exists():
         raise ValueError("Stage-2 requires newly collected demonstrations, not estimated-feedback Stage-1 data")
     info = json.loads((dataset_root / "meta/info.json").read_text(encoding="utf-8"))
     features = info.get("features", {})
@@ -66,12 +153,11 @@ def load_quads(path: Path, dataset_root: Path):
     for camera in ("left_eye", "left_wrist", "right_wrist"):
         if features.get(f"observation.images.{camera}", {}).get("dtype") not in {"image", "video"}:
             raise ValueError(f"Stage-2 camera feature missing: {camera}")
-    raw = path.read_bytes()
-    payload = json.loads(raw)
-    if payload.get("schema_version") != 1 or not isinstance(payload.get("groups"), list):
+    if not isinstance(payload.get("groups"), list):
         raise ValueError("Unsupported Stage-2 quadruple manifest")
     if payload.get("metadata_sha256") != fingerprint:
         raise ValueError("Stage-2 manifest metadata_sha256 does not match the LeRobot dataset")
+    provenance = _replay_provenance(payload, dataset_root, records) if replay else None
     seen_groups, seen_episodes = set(), set()
     quads = []
     for row in payload["groups"]:
@@ -88,6 +174,11 @@ def load_quads(path: Path, dataset_root: Path):
                 or len(set(ids)) != 4 or seen_episodes.intersection(ids)):
             raise ValueError(f"{group_id}: four distinct episode indices required in role order")
         seen_episodes.update(ids)
+        if provenance is not None:
+            selected = [provenance[i] for i in ids]
+            if (row.get("source_episodes") != [r["source_episode"] for r in selected]
+                    or any(r["estimated_coordinates"] or r["old_base_episode"] is not None for r in selected)):
+                raise ValueError(f"{group_id}: aligned roles must match new, measured source episodes")
         prompts = [records[i]["tasks"][0].strip() for i in ids]
         if not prompts[0] or not prompts[1] or prompts[0] == prompts[1] or prompts[:2] != prompts[2:]:
             raise ValueError(f"{group_id}: roles must be [Oa/I1, Oa/I2, Ob/I1, Ob/I2] with matching task labels")
@@ -103,7 +194,7 @@ def load_quads(path: Path, dataset_root: Path):
         if family == "task3" and attention[2]:
             raise ValueError(f"{group_id}: Task 3 does not align the (0,3) target locations")
         quads.append(Quad(group_id, family, tuple(ids), tuple(map(tuple, windows)), attention, split_group))
-    if seen_episodes != set(range(len(records))):
+    if not replay and seen_episodes != set(range(len(records))):
         raise ValueError("Every Stage-2 episode must belong to exactly one quadruple; use a separate repo for extras")
     return tuple(quads), records, fingerprint, hashlib.sha256(raw).hexdigest()
 
@@ -112,6 +203,11 @@ def build_split(dataset_root: Path, manifest: Path, output: Path, fraction: floa
     if not 0 < fraction < 0.5:
         raise ValueError("Validation fraction must be between 0 and 0.5")
     quads, records, fingerprint, digest = load_quads(manifest, dataset_root)
+    annotations = json.loads(manifest.read_bytes())
+    if _protocol(annotations) == REPLAY_PROTOCOL:
+        payload = _replay_split(dataset_root, annotations, quads, records, fingerprint, digest)
+        _write_split(output, payload)
+        return payload
     by_family = {}
     family_by_split_group = {}
     groups = [""] * len(records)
@@ -144,10 +240,14 @@ def build_split(dataset_root: Path, manifest: Path, output: Path, fraction: floa
             for q in quads if q.split_group in heldout
         ],
     }
+    _write_split(output, payload)
+    return payload
+
+
+def _write_split(output, payload):
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
-    return payload
 
 
 def bound_quads(manifest: Path, dataset_root: Path, split_path: Path, *, require_attention=False):
@@ -158,8 +258,16 @@ def bound_quads(manifest: Path, dataset_root: Path, split_path: Path, *, require
         raise ValueError("Stage-2 split must be generated from this exact quadruple manifest and dataset")
     if any(split["groups"][i] != q.split_group for q in quads for i in q.episodes):
         raise ValueError("Stage-2 split_group binding has changed")
+    annotations = json.loads(manifest.read_bytes())
+    if _protocol(annotations) == REPLAY_PROTOCOL:
+        expected = _replay_split(dataset_root, annotations, quads, records, fingerprint, digest)
+        # dataset_root is informational and may change when the bundle is uploaded.
+        if any(split.get(key) != value for key, value in expected.items() if key != "dataset_root"):
+            raise ValueError("Stage-2 replay partition differs from the reviewed manifest")
+    elif split["schema_version"] != 1:
+        raise ValueError("Legacy Stage-2 manifests require a legacy split")
     train = set(split["train_episodes"])
-    selected = tuple(q for q in quads if q.episodes[0] in train)
+    selected = tuple(q for q in quads if train.intersection(q.episodes))
     if any(not set(q.episodes).issubset(train) for q in selected):
         raise ValueError("A training quadruple crosses the holdout boundary")
     if require_attention and not all(any(any(q.attention[start:start+2]) for q in selected)
@@ -198,15 +306,15 @@ def heldout_probe_cases(split, records, max_cases):
     return result
 
 
-def is_aligned_step(step: int) -> bool:
+def is_aligned_step(step: int, protocol: str = SAMPLING_PROTOCOL) -> bool:
     """The same schedule is used for all four recipes, including on resume."""
-    return step % 2 == 1
+    return step % 4 == 3 if protocol == REPLAY_PROTOCOL else step % 2 == 1
 
 
 class QuadBatchSampler:
     """Alternate whole-trajectory CFM batches and aligned counterfactual quads."""
 
-    def __init__(self, quads, records, episode_indices, seed):
+    def __init__(self, quads, records, episode_indices, seed, *, old_replay_episodes=None):
         self.quads = quads
         self.seed = seed
         self.start_step = 0
@@ -218,19 +326,50 @@ class QuadBatchSampler:
         self.frame_count = offset
         if not self.quads or self.frame_count < 4:
             raise ValueError("Stage-2 requires complete training quads and at least four training frames")
+        self.protocol = SAMPLING_PROTOCOL if old_replay_episodes is None else REPLAY_PROTOCOL
+        self.pools = None
+        if old_replay_episodes is not None:
+            old = set(old_replay_episodes)
+            if not old or not old < self.offsets.keys() or any(old.intersection(q.episodes) for q in quads):
+                raise ValueError("Replay requires distinct new and old training frames")
+            new_frames, old_frames = [], []
+            for i, start in self.offsets.items():
+                (old_frames if i in old else new_frames).extend(range(start, start + records[i]["length"]))
+            self.pools = new_frames, old_frames
+
+    def _replay_batch(self, step, cache):
+        # Three ordinary batches per four steps. Of the 60 ordinary slots per
+        # 20 optimizer steps, 12 are old: 12 / (20 * global BS 4) = 15%.
+        first = 4 * (step - step // 4)
+        batch = []
+        for slot in range(first, first + 4):
+            old_count, within = divmod(slot, 5)
+            old = within == 0
+            draw = old_count if old else slot - old_count - 1
+            pool = self.pools[old]
+            epoch, position = divmod(draw, len(pool))
+            if old not in cache or cache[old][0] != epoch:
+                shuffled = pool.copy()
+                random.Random(f"bpx-replay-v3:{self.seed}:{int(old)}:{epoch}").shuffle(shuffled)
+                cache[old] = (epoch, shuffled)
+            batch.append((cache[old][1][position], None))
+        return batch
 
     def __iter__(self):
         step = self.start_step
         cached_epoch = -1
         permutation = []
+        replay_cache = {}
         while True:
-            if is_aligned_step(step):
+            if is_aligned_step(step, self.protocol):
                 rng = random.Random(f"bpx-stage2-quad:{self.seed}:{step}")
                 quad = self.quads[rng.randrange(len(self.quads))]
                 # Event-aligned windows, not the same fraction of unrelated whole episodes.
                 phase = rng.random()
                 yield [(self.offsets[i] + lo + int(phase * (hi - lo + 1)), quad.attention)
                        for i, (lo, hi) in zip(quad.episodes, quad.windows, strict=True)]
+            elif self.pools is not None:
+                yield self._replay_batch(step, replay_cache)
             else:
                 # The first N whole-trajectory draws cover all N training frames, including
                 # prelude, transitions and termination. LeRobot owns normal tail padding.

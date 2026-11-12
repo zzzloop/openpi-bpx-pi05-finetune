@@ -231,12 +231,22 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
         raise ValueError("训练模式只能是 overwrite 或 resume")
     smoke = bool(values.get("stage2_smoke_test", False))
     if smoke and (config not in bpx_counterfactual.CONFIGS or mode == "resume"):
-        raise ValueError("四卡预检只用于第二阶段新实验；请先选择新实验和初始化权重")
+        raise ValueError("GPU 预检只用于第二阶段新实验；请先选择新实验和初始化权重")
     stage2_args = ()
+    smoke_units = 2
     if config in bpx_counterfactual.CONFIGS:
-        if (set(map(int, cuda_devices.split(","))) != {0, 1, 2, 3}
-                or fsdp_devices != 4 or batch_size != 4):
-            raise ValueError("第二阶段使用 GPU 0,1,2,3，global BS=4，FSDP=4")
+        device_ids = tuple(map(int, cuda_devices.split(",")))
+        try:
+            bpx_counterfactual.validate_training_topology(
+                config, batch_size=batch_size, fsdp_devices=fsdp_devices, gpu_count=len(device_ids),
+            )
+            expected = {2, 3} if fsdp_devices == 2 else {0, 1, 2, 3}
+            if set(device_ids) != expected:
+                raise ValueError("Invalid Stage-2 CUDA device IDs")
+        except ValueError as error:
+            topology = ("GPU 0,1,2,3 / FSDP=4" if config == bpx_counterfactual.QUAD_DIFF_CONFIG
+                        else "GPU 2,3 / FSDP=2 或 GPU 0,1,2,3 / FSDP=4")
+            raise ValueError(f"第二阶段要求 global BS=4；本组使用 {topology}") from error
         split = _require_stage2_split(values)
         raw_quad = str(values.get("counterfactual_manifest", "")).strip()
         if not raw_quad:
@@ -246,6 +256,8 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
             raise ValueError(f"四元组 manifest 不存在: {quad}")
         if hashlib.sha256(quad.read_bytes()).hexdigest() != split["quad_manifest_sha256"]:
             raise ValueError("四元组 manifest 已变更，需重新分组和归一化")
+        if bpx_counterfactual.sampling_protocol(quad) == bpx_counterfactual.REPLAY_PROTOCOL:
+            smoke_units = 4
         if mode == "overwrite" and not str(values.get("init_checkpoint", "")).strip():
             raise ValueError("新实验必须填写共同的 18000 初始化权重")
         stage2_args = (f"--counterfactual-manifest={quad}",)
@@ -284,7 +296,7 @@ def build_train(values: Mapping[str, object]) -> CommandSpec:
         ),
         cwd=root,
         env=env,
-        total_units=2 if smoke else steps,
+        total_units=smoke_units if smoke else steps,
     )
 
 

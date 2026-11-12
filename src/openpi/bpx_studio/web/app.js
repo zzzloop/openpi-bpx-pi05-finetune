@@ -527,11 +527,11 @@ $("startExport").onclick = () => {
 };
 async function submitTraining(smoke = false) {
   if (smoke && (!isStage2() || value("trainMode") === "resume")) {
-    toast("四卡预检需要选择第二阶段新实验及初始化权重", true);
+    toast("GPU 预检需要选择第二阶段新实验及初始化权重", true);
     return;
   }
   await loadConfigProfile();
-  if (!(await confirmDataBinding(smoke ? "四卡预检（不保存模型）" : "启动训练"))) return;
+  if (!(await confirmDataBinding(smoke ? "GPU 预检（不保存模型）" : "启动训练"))) return;
   start("/api/jobs/train", {
     ...dataEnvironment(), openpi_root: value("openpiRoot"), config_name: value("trainConfig"),
     exp_name: value("expName"), checkpoint_base_dir: value("checkpointRoot"), cuda_devices: value("cudaDevices"),
