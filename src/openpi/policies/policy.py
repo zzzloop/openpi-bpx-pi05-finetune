@@ -33,6 +33,7 @@ class Policy(BasePolicy):
         metadata: dict[str, Any] | None = None,
         pytorch_device: str = "cpu",
         is_pytorch: bool = False,
+        action_decode_state_key: str = "state",
     ):
         """Initialize the Policy.
 
@@ -46,6 +47,7 @@ class Policy(BasePolicy):
             pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda:0").
                           Only relevant when is_pytorch=True.
             is_pytorch: Whether the model is a PyTorch model. If False, assumes JAX model.
+            action_decode_state_key: Input field containing normalized state for output transforms.
         """
         self._model = model
         self._input_transform = _transforms.compose(transforms)
@@ -54,6 +56,7 @@ class Policy(BasePolicy):
         self._metadata = metadata or {}
         self._is_pytorch_model = is_pytorch
         self._pytorch_device = pytorch_device
+        self._action_decode_state_key = action_decode_state_key
 
         if self._is_pytorch_model:
             self._model = self._model.to(pytorch_device)
@@ -92,7 +95,7 @@ class Policy(BasePolicy):
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
         outputs = {
-            "state": inputs["state"],
+            "state": inputs[self._action_decode_state_key],
             "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
         }
         model_time = time.monotonic() - start_time

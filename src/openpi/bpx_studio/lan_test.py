@@ -116,5 +116,13 @@ def test_all_job_routes_build_matching_commands(tmp_path, monkeypatch):
             if route == "serve":
                 assert response.json()["argv"].count("--port=23789") == 1
                 assert response.json()["env"]["CUDA_VISIBLE_DEVICES"] == "2,3"
+                normal_args = response.json()["argv"]
+                assert "--bpx-zero-state" not in normal_args
+                ablated = client.post("/api/jobs/serve", json={**payload, "bpx_zero_state": True})
+                assert ablated.status_code == 200, ablated.text
+                ablated_args = ablated.json()["argv"]
+                assert ablated_args.count("--bpx-zero-state") == 1
+                assert ablated_args.index("--bpx-zero-state") < ablated_args.index("policy:checkpoint")
+                assert [arg for arg in ablated_args if arg != "--bpx-zero-state"] == normal_args
             if route in {"normalize", "train"}:
                 assert response.json()["env"]["HF_LEROBOT_HOME"] == str(raw)

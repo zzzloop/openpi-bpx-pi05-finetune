@@ -106,6 +106,17 @@ class BpxInputs(transforms.DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class BpxZeroModelState(transforms.DataTransformFn):
+    """Ablate the physical state before normalization, without changing action decoding."""
+
+    decode_state_key: ClassVar[str] = "_bpx_measured_state"
+
+    def __call__(self, data: dict) -> dict:
+        state = data["state"]
+        return {**data, self.decode_state_key: state, "state": np.zeros_like(state)}
+
+
+@dataclasses.dataclass(frozen=True)
 class BpxOutputs(transforms.DataTransformFn):
     """Return absolute BPX actions in the original 23-element robot order."""
 

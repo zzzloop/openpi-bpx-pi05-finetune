@@ -6,6 +6,7 @@ from typing import Any
 import jax.numpy as jnp
 
 import openpi.models.model as _model
+from openpi.policies import bpx_policy
 import openpi.policies.policy as _policy
 import openpi.shared.download as download
 from openpi.training import checkpoints as _checkpoints
@@ -23,6 +24,7 @@ def create_trained_policy(
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
     pytorch_device: str | None = None,
+    bpx_zero_state: bool = False,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -39,16 +41,23 @@ def create_trained_policy(
         pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda", "cuda:0").
                       If None and is_pytorch=True, will use "cuda" if available, otherwise "cpu".
 
+        bpx_zero_state: BPX Pi05 ablation using zero physical state as model input only.
+
     Note:
         The function automatically detects whether the model is PyTorch-based by checking for the
         presence of "model.safensors" in the checkpoint directory.
     """
+    if bpx_zero_state and (train_config.model.model_type != _model.ModelType.PI05
+                           or not isinstance(train_config.data, _config.LeRobotBpxDataConfig)):
+        raise ValueError("BPX zero-state inference requires a BPX Pi05 checkpoint")
     repack_transforms = repack_transforms or transforms.Group()
     checkpoint_dir = download.maybe_download(str(checkpoint_dir))
 
     # Check if this is a PyTorch model by looking for model.safetensors
     weight_path = os.path.join(checkpoint_dir, "model.safetensors")
     is_pytorch = os.path.exists(weight_path)
+    if bpx_zero_state and is_pytorch:
+        raise ValueError("BPX zero-state inference supports JAX checkpoints only")
 
     logging.info("Loading model...")
     if is_pytorch:
@@ -82,13 +91,25 @@ def create_trained_policy(
         except ImportError:
             pytorch_device = "cpu"
 
+    input_stats = norm_stats
+    decode_key = "state"
+    state_ablation = ()
+    metadata = train_config.policy_metadata
+    if bpx_zero_state:
+        decode_key = bpx_policy.BpxZeroModelState.decode_state_key
+        state_ablation = (bpx_policy.BpxZeroModelState(),)
+        # Normalize both views identically; only `state` is tokenized and sent to the model.
+        input_stats = {**norm_stats, decode_key: norm_stats["state"]}
+        metadata = {**(metadata or {}), "bpx_input_mode": "zero_state"}
+
     return _policy.Policy(
         model,
         transforms=[
             *repack_transforms.inputs,
             transforms.InjectDefaultPrompt(default_prompt),
             *data_config.data_transforms.inputs,
-            transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            *state_ablation,
+            transforms.Normalize(input_stats, use_quantiles=data_config.use_quantile_norm),
             *model_inputs,
         ],
         output_transforms=[
@@ -98,7 +119,8 @@ def create_trained_policy(
             *repack_transforms.outputs,
         ],
         sample_kwargs=sample_kwargs,
-        metadata=train_config.policy_metadata,
+        metadata=metadata,
         is_pytorch=is_pytorch,
         pytorch_device=pytorch_device if is_pytorch else None,
+        action_decode_state_key=decode_key,
     )

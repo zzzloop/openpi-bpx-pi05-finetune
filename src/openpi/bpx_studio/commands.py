@@ -431,6 +431,7 @@ def build_policy_serve(values: Mapping[str, object]) -> CommandSpec:
             "run",
             "scripts/serve_policy.py",
             "--port=23789",
+            *(("--bpx-zero-state",) if values.get("bpx_zero_state", False) else ()),
             "policy:checkpoint",
             f"--policy.config={config}",
             f"--policy.dir={checkpoint}",

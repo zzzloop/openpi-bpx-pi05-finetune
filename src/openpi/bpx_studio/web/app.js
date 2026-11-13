@@ -592,10 +592,17 @@ $("validationManifest").addEventListener("change", () => {
     ? "已选择独立验证。先用该清单重新归一化，再启动新实验；旧的全量训练不能补称独立验证。"
     : "未启用独立验证；仅显示训练 loss。";
 });
-$("startServe").onclick = () => start("/api/jobs/serve", {
+const startPolicyServe = (zeroState = false) => start("/api/jobs/serve", {
   openpi_root: value("openpiRoot"), config_name: value("serveConfig"), checkpoint_dir: value("serveCheckpoint"),
   cuda_devices: value("serveCudaDevices"), memory_fraction: num("serveMemoryFraction"),
+  ...(zeroState ? {bpx_zero_state: true} : {}),
 });
+$("startServe").onclick = () => startPolicyServe();
+$("startZeroStateServe").onclick = () => {
+  if (confirm("仅将模型看到的关节状态置零，预测动作可能与正常模式不同。请确认机器人策略已停用，建议先用 dry-run 对照。启动置零推理服务？")) {
+    return startPolicyServe(true);
+  }
+};
 $("stopServe").onclick = async () => {
   try {
     const jobs = await api("/api/jobs");
@@ -855,10 +862,12 @@ async function loadCheckpoints(preferred) {
   else if (sameConfig) select.value = sameConfig.path;
   applyCheckpointConfig();
   $("startServe").disabled = !select.value;
+  $("startZeroStateServe").disabled = !select.value;
   } catch (error) {
     checkpointRecords = [];
     $("serveCheckpoint").innerHTML = "<option value=''>扫描失败，请点击刷新重试</option>";
     $("startServe").disabled = true;
+    $("startZeroStateServe").disabled = true;
     toast(error.message, true);
   }
 }

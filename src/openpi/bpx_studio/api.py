@@ -143,6 +143,7 @@ class ServeRequest(BaseModel):
     checkpoint_dir: str
     cuda_devices: str = "2,3"
     memory_fraction: float = Field(default=0.96, ge=0.1, le=1.0)
+    bpx_zero_state: bool = False
 
 
 def default_paths(data_root: pathlib.Path) -> dict[str, str]:

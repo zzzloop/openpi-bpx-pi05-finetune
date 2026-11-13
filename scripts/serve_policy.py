@@ -50,6 +50,8 @@ class Args:
     port: int = 23789
     # Record the policy's behavior for debugging.
     record: bool = False
+    # BPX Pi05 only: replace the model's physical joint state with zeros before normalization.
+    bpx_zero_state: bool = False
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
@@ -90,15 +92,20 @@ def create_policy(args: Args) -> _policy.Policy:
     match args.policy:
         case Checkpoint():
             return _policy_config.create_trained_policy(
-                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt
+                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt,
+                bpx_zero_state=args.bpx_zero_state,
             )
         case Default():
+            if args.bpx_zero_state:
+                raise ValueError("Select an explicit BPX Pi05 checkpoint for zero-state inference")
             return create_default_policy(args.env, default_prompt=args.default_prompt)
 
 
 def main(args: Args) -> None:
     policy = create_policy(args)
     policy_metadata = policy.metadata
+    if args.bpx_zero_state:
+        logging.info("BPX ZERO STATE: physical model input zeroed; measured state retained for action decoding")
 
     # Record the policy's behavior.
     if args.record:
